@@ -14,8 +14,6 @@ import time
 import urllib.error
 import urllib.request
 
-import core
-
 DEFAULT_URL = "http://localhost:5000"
 
 
@@ -103,8 +101,7 @@ class LibreTranslator:
     BATCH_CHARS = 6000
 
     def __init__(self, base_url, src, dest, api_key=None, cache=None,
-                 delay=None, retries=3, log=None, on_progress=None,
-                 batch_items=None, batch_chars=None):
+                 delay=None, retries=3, log=None, on_progress=None):
         self.base_url = (base_url or DEFAULT_URL).strip()
         self.src = src
         self.dest = dest
@@ -114,10 +111,6 @@ class LibreTranslator:
         self.retries = retries
         self.log = log or (lambda msg: None)
         self.on_progress = on_progress or (lambda: None)
-        if batch_items is not None:
-            self.BATCH_ITEMS = batch_items
-        if batch_chars is not None:
-            self.BATCH_CHARS = batch_chars
         self.stats = {
             "requests": 0, "cache_hits": 0, "errors": 0, "rate_limit_hits": 0,
             "batch_requests": 0, "batched_lines": 0,
@@ -179,32 +172,6 @@ class LibreTranslator:
                 parts = raw_translate_batch(
                     batch, self.base_url, self.src, self.dest, self.api_key,
                 )
-                bad = [
-                    src_text for src_text, translated in zip(batch, parts)
-                    if not core.tokens_preserved(src_text, translated)
-                ]
-                if bad:
-                    if len(batch) > 1:
-                        # Не кэшируем ничего из этой пачки и пробуем
-                        # разделить её на части поменьше (см.
-                        # _translate_with_split) — так проблема сузится
-                        # до конкретной строки, а не испортит кэш для
-                        # всех остальных, у которых маркеры были в порядке.
-                        self.log(
-                            "LibreTranslate повредил защищённый маркер "
-                            "(тег/подстановку) как минимум в одной строке из "
-                            "{0} — делю пачку на части поменьше, чтобы не "
-                            "закэшировать испорченный результат.".format(len(batch))
-                        )
-                        return False
-                    self.log(
-                        "LibreTranslate повредил защищённый маркер "
-                        "(тег/подстановку) (попытка {0}/{1}) — не сохраняю "
-                        "в кэш, пробую ещё раз.".format(attempt, self.retries)
-                    )
-                    time.sleep(cooldown)
-                    cooldown = min(self.MAX_COOLDOWN, cooldown * 1.7)
-                    continue
                 for src_text, translated in zip(batch, parts):
                     self.cache[src_text] = translated
                 self.stats["requests"] += 1

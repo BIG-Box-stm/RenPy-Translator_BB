@@ -83,27 +83,16 @@ _RE_PROTECT = re.compile(
     _RE_FORMAT_SPEC + r'|\{[^{}]*\}|\[[^\[\]]*\]|\\n|\\"|\\\\'
 )
 
-# Маркер-обёртка для защищённых кусков текста.
-#
-# История этого места (это уже третья итерация — сохраняю как memo):
-# 1) Символы из приватной зоны Юникода (U+E000/U+E001) — некоторые
-#    переводчики (особенно нейросетевые) выбрасывали незнакомые
-#    управляющие символы при токенизации, оставляя голые цифры индекса
-#    прямо в переводе ("0 1 2" вместо тегов).
-# 2) ASCII-маркер "@@0@@" — работал с Google Translate (выглядит как
-#    единое "слово" без пробелов), но на реальном LibreTranslate
-#    (self-hosted нейросеть, например Argos Translate) вызвал МАССОВУЮ
-#    порчу — судя по всему, нейросетевые модели, обученные на обычных
-#    предложениях, воспринимают изолированный символьный "мусор" вроде
-#    "@@0@@" как то, что не нужно копировать, и либо выбрасывают его,
-#    либо портят при генерации.
-# 3) Текущий вариант — маркер только из букв и цифр (без "@" и других
-#    символов), похожий на случайное "слово"/идентификатор. Такие
-#    незнакомые "слова" (in-vocabulary-unknown) переводческие модели
-#    почти всегда копируют как есть — это стандартное поведение при
-#    переводе имён собственных, названий и т.п.
-_TOKEN_OPEN = "Zqtx"
-_TOKEN_CLOSE = "xtqZ"
+# Маркер-обёртка для защищённых кусков текста. Раньше использовались
+# символы из приватной зоны Юникода (U+E000/U+E001) — но выяснилось, что
+# некоторые переводчики (особенно нейросетевые, например LibreTranslate)
+# просто выбрасывают незнакомые управляющие символы при токенизации,
+# оставляя голые цифры индекса прямо в переводе ("0 1 2" вместо тегов).
+# Обычный ASCII-маркер вида "@@0@@" выглядит как единое "слово" без
+# пробелов, и переводчики почти всегда копируют такие "слова" как есть,
+# не разбирая их на части и не выбрасывая символы.
+_TOKEN_OPEN = "@@"
+_TOKEN_CLOSE = "@@"
 _RE_TOKEN = re.compile(re.escape(_TOKEN_OPEN) + r'(\d+)' + re.escape(_TOKEN_CLOSE))
 
 
@@ -201,7 +190,7 @@ def translate_quoted(quoted, translate_fn):
     """quoted — строка вида '"текст"'. Возвращает новую строку в кавычках
     с переведённым текстом, сохранив теги/подстановки/переносы строк."""
     inner = quoted[1:-1]
-    if not needs_translation(quoted):
+    if inner.strip() == '':
         return quoted
     protected, tokens = protect(inner)
     translated = translate_fn(protected)
@@ -226,53 +215,6 @@ def translate_quoted(quoted, translate_fn):
 def _all_tokens_present(text, count):
     found = {int(m.group(1)) for m in _RE_TOKEN.finditer(text)}
     return all(i in found for i in range(count))
-
-
-def _has_translatable_content(protected):
-    """True, если в защищённом тексте (после protect()) осталась хоть
-    одна буква/цифра ВНЕ маркеров — то есть реально есть что
-    переводить. Строка вроде "{w}{nw}" (только теги, без единого
-    слова) после protect() превращается в один маркер или несколько
-    маркеров подряд — переводить там нечего."""
-    stripped = _RE_TOKEN.sub('', protected)
-    return any(ch.isalnum() for ch in stripped)
-
-
-def needs_translation(quoted):
-    """True, если в этой кавычечной строке вообще есть что переводить.
-    Пустые строки и строки, состоящие только из тегов/подстановок
-    (например "{w}{nw}" или один голый "[name]") возвращают False —
-    их не нужно (и, как выяснилось на практике, вредно) отправлять
-    переводчику: на реальном LibreTranslate/Argos Translate замечено,
-    что такая "пустышка" (текст без единого настоящего слова) в общей
-    пачке сбивает у движка определение границ предложений и он
-    сшивает её перевод с соседней строкой пачки — портится не только
-    сама пустышка, но и нормальная строка рядом с ней."""
-    inner = quoted[1:-1]
-    if inner.strip() == '':
-        return False
-    protected, _ = protect(inner)
-    return _has_translatable_content(protected)
-
-
-def tokens_preserved(source_protected, translated):
-    """True, если translated содержит как минимум все маркеры @@N@@,
-    которые были в source_protected. Нужна движкам перевода
-    (gtranslate/deepl_translate/libretranslate_translate), чтобы не
-    закэшировать результат пакетного перевода, где сервис вернул
-    правильное КОЛИЧЕСТВО строк, но при этом потерял/повредил маркер
-    внутри одной из них — такой результат нельзя запоминать в кэше:
-    иначе испорченный перевод будет навсегда "залипать" и
-    воспроизводиться при каждом следующем запуске, даже после полной
-    переустановки перевода (сам файл .rpy можно очистить, а кэш —
-    отдельный файл, и порча в нём переживёт эту очистку)."""
-    if translated is None:
-        return False
-    needed = {int(m.group(1)) for m in _RE_TOKEN.finditer(source_protected)}
-    if not needed:
-        return True
-    found = {int(m.group(1)) for m in _RE_TOKEN.finditer(translated)}
-    return needed <= found
 
 
 def find_translatable(lines):
@@ -343,11 +285,11 @@ def _is_untranslated(entry, overwrite):
 def extract_protected_text(quoted):
     """quoted — строка вида '"текст"'. Возвращает текст с защищёнными
     тегами/подстановками (как перед отправкой в переводчик), либо None,
-    если переводить нечего (пустая строка или только теги/подстановки —
-    см. needs_translation())."""
-    if not needs_translation(quoted):
+    если переводить нечего (пустая строка)."""
+    inner = quoted[1:-1]
+    if inner.strip() == '':
         return None
-    protected, _ = protect(quoted[1:-1])
+    protected, _ = protect(inner)
     return protected
 
 
@@ -372,42 +314,16 @@ def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None):
     Если translate_fn — это CachedTranslator с заранее прогретым кэшем
     (см. collect_needed_texts() + warm_batch()), эта функция работает
     практически мгновенно, без сетевых запросов.
-    stats — dict со счётчиками translated/skipped/failed (обновляется).
+    stats — dict со счётчиками translated/skipped (обновляется).
     log(msg) — необязательная функция логирования.
     """
     if stats is None:
-        stats = {'translated': 0, 'skipped': 0, 'failed': 0}
-    stats.setdefault('failed', 0)
-    stats.setdefault('nothing_to_translate', 0)
-    log = log or (lambda msg: None)
+        stats = {'translated': 0, 'skipped': 0}
     out = list(lines)
 
     for entry in find_translatable(out):
         if _is_untranslated(entry, overwrite):
-            if not needs_translation(entry['orig_quoted']):
-                # Строка состоит только из тегов/подстановок — переводить
-                # нечего, и отправлять такое переводчику вредно (см.
-                # needs_translation()). Не трогаем строку и не считаем
-                # это ни успехом, ни неудачей.
-                stats['nothing_to_translate'] += 1
-                continue
             translated = translate_quoted(entry['orig_quoted'], translate_fn)
-            if translated == entry['orig_quoted']:
-                # translate_quoted() откатился на исходный текст (переводчик
-                # не ответил, либо повредил защищённый маркер) — строка
-                # фактически осталась непереведённой. НЕ записываем её и не
-                # считаем успехом: иначе программа рапортует "переведено",
-                # хотя в файле всё ещё английский текст, и при каждом
-                # следующем запуске эта же строка будет находиться заново
-                # (что выглядит как "зацикливание"). Оставляем как есть —
-                # find_translatable() снова найдёт её при следующем запуске,
-                # когда, например, переводчик будет доступнее.
-                stats['failed'] += 1
-                log(
-                    "Не удалось перевести (оставлено как есть): {0!r}"
-                    .format(entry['orig_quoted'][:80])
-                )
-                continue
             if entry['type'] == 'old_new':
                 eol = get_line_ending(out[entry['new_line_idx']])
                 out[entry['new_line_idx']] = f"{entry['new_indent']}new {translated}{eol}"

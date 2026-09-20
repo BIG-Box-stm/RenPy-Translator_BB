@@ -60,27 +60,6 @@ LANGUAGES = [
     ("Турецкий", "tr"),
 ]
 LANG_NAME_TO_CODE = dict(LANGUAGES)
-
-# Значения по умолчанию для размера пачки/задержки — берутся прямо из
-# самих классов движков (единственный источник правды), чтобы подсказка
-# в интерфейсе никогда не разошлась с реальным поведением программы.
-ENGINE_DEFAULTS = {
-    "google": {
-        "batch_items": gtranslate.CachedTranslator.BATCH_ITEMS,
-        "batch_chars": gtranslate.CachedTranslator.BATCH_CHARS,
-        "delay": gtranslate.CachedTranslator.BASE_DELAY,
-    },
-    "deepl": {
-        "batch_items": deepl_translate.DeepLTranslator.BATCH_ITEMS,
-        "batch_chars": deepl_translate.DeepLTranslator.BATCH_CHARS,
-        "delay": deepl_translate.DeepLTranslator.BASE_DELAY,
-    },
-    "libretranslate": {
-        "batch_items": libretranslate_translate.LibreTranslator.BATCH_ITEMS,
-        "batch_chars": libretranslate_translate.LibreTranslator.BATCH_CHARS,
-        "delay": libretranslate_translate.LibreTranslator.BASE_DELAY,
-    },
-}
 LANG_CODE_TO_NAME = {v: k for k, v in LANGUAGES}
 
 
@@ -119,7 +98,6 @@ class App(tk.Tk):
         self.stop_requested = False
 
         self._build_ui()
-        self._on_engine_changed()
         self.after(100, self._poll_queue)
 
     # ------------------------------------------------------------------
@@ -221,25 +199,6 @@ class App(tk.Tk):
             state="disabled",
         )
         self.libre_url_entry.grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(2, 0))
-
-        ttk.Label(frame_engine, text="Строк в пачке:").grid(
-            row=0, column=3, sticky="w", padx=(20, 0)
-        )
-        self.batch_items_var = tk.StringVar(value="")
-        ttk.Entry(frame_engine, textvariable=self.batch_items_var, width=6).grid(
-            row=1, column=3, sticky="w", padx=(20, 0), pady=(2, 0)
-        )
-        ttk.Label(frame_engine, text="Задержка между запросами, сек:").grid(
-            row=0, column=4, sticky="w", padx=(12, 0)
-        )
-        self.batch_delay_var = tk.StringVar(value="")
-        ttk.Entry(frame_engine, textvariable=self.batch_delay_var, width=6).grid(
-            row=1, column=4, sticky="w", padx=(12, 0), pady=(2, 0)
-        )
-        self.batch_default_label = ttk.Label(frame_engine, text="")
-        self.batch_default_label.grid(
-            row=2, column=3, columnspan=2, sticky="w", padx=(20, 0), pady=(2, 0)
-        )
 
         frame_opts = ttk.Frame(self)
         frame_opts.pack(fill="x", **pad)
@@ -395,18 +354,6 @@ class App(tk.Tk):
         self.libre_url_entry.configure(
             state="normal" if engine.startswith("LibreTranslate") else "disabled"
         )
-        if engine.startswith("DeepL"):
-            key = "deepl"
-        elif engine.startswith("LibreTranslate"):
-            key = "libretranslate"
-        else:
-            key = "google"
-        d = ENGINE_DEFAULTS[key]
-        self.batch_default_label.configure(
-            text="(сейчас по умолчанию: {0} строк / {1} симв. в пачке, "
-            "задержка {2} с — оставьте поля пустыми, чтобы использовать "
-            "эти значения)".format(d["batch_items"], d["batch_chars"], d["delay"])
-        )
 
     def _on_dest_lang_changed(self, _event=None):
         # По умолчанию имя языка для Ren'Py совпадает с коротким кодом,
@@ -506,36 +453,6 @@ class App(tk.Tk):
         libre_url = self.libre_url_var.get().strip() or libretranslate_translate.DEFAULT_URL
         libre_key = self.libre_key_var.get().strip()
 
-        batch_items_raw = self.batch_items_var.get().strip()
-        batch_delay_raw = self.batch_delay_var.get().strip()
-        batch_items = None
-        batch_delay = None
-        try:
-            if batch_items_raw:
-                batch_items = int(batch_items_raw)
-                if batch_items < 1:
-                    raise ValueError
-        except ValueError:
-            messagebox.showerror(
-                "Неверное значение",
-                "«Строк в пачке» должно быть целым числом больше нуля "
-                "(или пустым — тогда используется значение по умолчанию).",
-            )
-            return
-        try:
-            if batch_delay_raw:
-                batch_delay = float(batch_delay_raw.replace(",", "."))
-                if batch_delay < 0:
-                    raise ValueError
-        except ValueError:
-            messagebox.showerror(
-                "Неверное значение",
-                "«Задержка между запросами» должна быть числом не меньше "
-                "нуля (или пустым — тогда используется значение по "
-                "умолчанию).",
-            )
-            return
-
         self.stop_requested = False
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
@@ -548,7 +465,7 @@ class App(tk.Tk):
         self.worker_thread = threading.Thread(
             target=self._worker,
             args=(lang_dir, files, src_code, dest_code, overwrite, use_cache,
-                  engine, deepl_key, libre_url, libre_key, batch_items, batch_delay),
+                  engine, deepl_key, libre_url, libre_key),
             daemon=True,
         )
         self.worker_thread.start()
@@ -723,8 +640,7 @@ class App(tk.Tk):
     # Фоновый поток
     # ------------------------------------------------------------------
     def _worker(self, lang_dir, files, src_code, dest_code, overwrite, use_cache,
-                engine, deepl_key, libre_url, libre_key, batch_items=None,
-                batch_delay=None):
+                engine, deepl_key, libre_url, libre_key):
         cache_names = {
             "google": project.CACHE_FILENAME,
             "deepl": project.CACHE_FILENAME_DEEPL,
@@ -761,24 +677,21 @@ class App(tk.Tk):
             translator = deepl_translate.DeepLTranslator(
                 api_key=deepl_key, src=src_code, dest=dest_code, cache=cache,
                 log=self._log, on_progress=on_progress,
-                delay=batch_delay, batch_items=batch_items,
             )
         elif engine == "libretranslate":
             translator = libretranslate_translate.LibreTranslator(
                 base_url=libre_url, src=src_code, dest=dest_code,
                 api_key=(libre_key or None), cache=cache,
                 log=self._log, on_progress=on_progress,
-                delay=batch_delay, batch_items=batch_items,
             )
         else:
             translator = gtranslate.CachedTranslator(
                 src=src_code, dest=dest_code, cache=cache,
                 log=self._log, on_progress=on_progress,
-                delay=batch_delay, batch_items=batch_items,
             )
         self.translator = translator
 
-        total_stats = {"translated": 0, "skipped": 0, "failed": 0, "nothing_to_translate": 0}
+        total_stats = {"translated": 0, "skipped": 0}
 
         # --- Фаза 1: читаем все файлы и собираем уникальные строки,
         # которые нужно перевести, чтобы перевести их пачками (несколько
@@ -831,22 +744,17 @@ class App(tk.Tk):
             self._log("Обрабатываю: {0} [{1}/{2}]".format(rel, idx, total_files))
             try:
                 lines = files_lines[path]
-                file_stats = {"translated": 0, "skipped": 0, "failed": 0, "nothing_to_translate": 0}
+                file_stats = {"translated": 0, "skipped": 0}
                 new_lines = core.process_lines(
                     lines, translator, overwrite=overwrite, stats=file_stats,
-                    log=self._log,
                 )
                 if file_stats["translated"] > 0:
                     project.write_lines(path, new_lines)
                 total_stats["translated"] += file_stats["translated"]
                 total_stats["skipped"] += file_stats["skipped"]
-                total_stats["failed"] += file_stats["failed"]
-                total_stats["nothing_to_translate"] += file_stats["nothing_to_translate"]
                 self._log(
-                    "  переведено: {0}, пропущено (уже переведено): {1}{2}".format(
-                        file_stats["translated"], file_stats["skipped"],
-                        ", НЕ УДАЛОСЬ: {0}".format(file_stats["failed"])
-                        if file_stats["failed"] else "",
+                    "  переведено: {0}, пропущено (уже переведено): {1}".format(
+                        file_stats["translated"], file_stats["skipped"]
                     )
                 )
             except Exception as e:
@@ -860,31 +768,16 @@ class App(tk.Tk):
         self._log("")
         self._log(
             "Готово. Всего переведено строк: {0}, пропущено: {1}, "
-            "не удалось перевести: {2}, без переводимого текста (только "
-            "теги — пропущены): {3}, запросов к переводчику ({4}): {5} "
-            "(из них пакетных: {6}, переведено ими строк: {7}), из кэша: "
-            "{8}, срабатываний ограничения скорости: {9}, ошибок "
-            "перевода: {10}.".format(
+            "запросов к переводчику ({2}): {3} (из них пакетных: {4}, "
+            "переведено ими строк: {5}), из кэша: {6}, срабатываний "
+            "ограничения скорости: {7}, ошибок перевода: {8}.".format(
                 total_stats["translated"], total_stats["skipped"],
-                total_stats["failed"], total_stats["nothing_to_translate"],
                 engine_titles[engine],
                 translator.stats["requests"], translator.stats["batch_requests"],
                 translator.stats["batched_lines"], translator.stats["cache_hits"],
                 translator.stats["rate_limit_hits"], translator.stats["errors"],
             )
         )
-        if total_stats["failed"] > 0:
-            self._log(
-                "{0} строк(и) остались непереведёнными (см. пометки "
-                "«Не удалось перевести» выше) — обычно это значит, что "
-                "переводчик вернул ответ с повреждённым тегом/подстановкой "
-                "внутри, и программа сознательно не стала его использовать, "
-                "чтобы не сломать игру. Такие строки не запоминаются как "
-                "«готовые» и будут снова предложены к переводу при "
-                "следующем запуске — просто запустите перевод ещё раз "
-                "(при необходимости — с другим движком)."
-                .format(total_stats["failed"])
-            )
         if translator.stats["rate_limit_hits"] > 0:
             self._log(
                 "Сервис перевода несколько раз ограничивал скорость — это "
