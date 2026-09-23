@@ -18,6 +18,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import core
+
 FREE_ENDPOINT = "https://api-free.deepl.com/v2/translate"
 PRO_ENDPOINT = "https://api.deepl.com/v2/translate"
 
@@ -117,7 +119,7 @@ class DeepLTranslator:
     BATCH_CHARS = 20000
 
     def __init__(self, api_key, src, dest, cache=None, delay=None, retries=4,
-                 log=None, on_progress=None):
+                 log=None, on_progress=None, batch_items=None, batch_chars=None):
         self.api_key = api_key
         self.src = src
         self.dest = dest
@@ -126,6 +128,10 @@ class DeepLTranslator:
         self.retries = retries
         self.log = log or (lambda msg: None)
         self.on_progress = on_progress or (lambda: None)
+        if batch_items is not None:
+            self.BATCH_ITEMS = batch_items
+        if batch_chars is not None:
+            self.BATCH_CHARS = batch_chars
         self.stats = {
             "requests": 0, "cache_hits": 0, "errors": 0, "rate_limit_hits": 0,
             "batch_requests": 0, "batched_lines": 0,
@@ -185,6 +191,30 @@ class DeepLTranslator:
                         "DeepL вернул неожиданное число строк ({0} вместо {1}) "
                         "— пропускаю эту пачку.".format(len(parts), len(batch))
                     )
+                    return
+                bad = [
+                    src_text for src_text, translated in zip(batch, parts)
+                    if not core.tokens_preserved(src_text, translated)
+                ]
+                if bad:
+                    # DeepL ответил тем же количеством строк, но потерял или
+                    # повредил защищённый маркер (тег/подстановку) как минимум
+                    # в одной из них. Не кэшируем НИЧЕГО из этой пачки —
+                    # закэшированная порча будет "залипать" навсегда, переживая
+                    # даже полную переустановку перевода. Хорошие строки из
+                    # этой же пачки получат новый шанс по одной в process_lines()
+                    # (там перевод берётся через __call__, который сам делает
+                    # запрос заново, если строки нет в кэше).
+                    self.log(
+                        "DeepL повредил защищённый маркер (тег/подстановку) "
+                        "как минимум в одной строке из {0} — эта пачка не "
+                        "кэшируется, строки будут переведены по одной "
+                        "позже.".format(len(batch))
+                    )
+                    if attempt < self.retries:
+                        wait = min(1.0 * attempt, 5.0)
+                        time.sleep(wait)
+                        continue
                     return
                 for src_text, translated in zip(batch, parts):
                     self.cache[src_text] = translated

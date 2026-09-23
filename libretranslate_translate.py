@@ -6,6 +6,17 @@
 и сервер вернёт список переводов той же длины и в ТОМ ЖЕ порядке — без
 всякого трюка с разделителями.
 
+Про маркеры (теги/подстановки вида {i}, [name] и т.п.): этот файл о них
+ничего не знает и знать не должен — их подстановкой и восстановлением
+занимается core.protect()/core.restore() ДО того, как текст сюда
+попадёт, и ПОСЛЕ того, как отсюда вернётся перевод. Сюда прилетает уже
+готовая защищённая строка, и она просто пересылается на сервер как
+обычный текст — проверка целостности маркера здесь сознательно не
+делается (раньше была, но заметно замедляла перевод, потому что при
+любом расхождении пачка бесконечно делилась пополам; сам факт
+"переведено/не переведено" всё равно перепроверяется в другом месте
+программы).
+
 Документация: https://docs.libretranslate.com/
 """
 
@@ -101,7 +112,8 @@ class LibreTranslator:
     BATCH_CHARS = 6000
 
     def __init__(self, base_url, src, dest, api_key=None, cache=None,
-                 delay=None, retries=3, log=None, on_progress=None):
+                 delay=None, retries=3, log=None, on_progress=None,
+                 batch_items=None, batch_chars=None):
         self.base_url = (base_url or DEFAULT_URL).strip()
         self.src = src
         self.dest = dest
@@ -111,6 +123,13 @@ class LibreTranslator:
         self.retries = retries
         self.log = log or (lambda msg: None)
         self.on_progress = on_progress or (lambda: None)
+        # batch_items/batch_chars — только настройка размера пачки (поля
+        # "Строк в пачке" / соответствующий предел символов в GUI). К
+        # маркерам и к их проверке отношения не имеет.
+        if batch_items is not None:
+            self.BATCH_ITEMS = batch_items
+        if batch_chars is not None:
+            self.BATCH_CHARS = batch_chars
         self.stats = {
             "requests": 0, "cache_hits": 0, "errors": 0, "rate_limit_hits": 0,
             "batch_requests": 0, "batched_lines": 0,

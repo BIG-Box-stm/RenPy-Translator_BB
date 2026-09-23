@@ -16,6 +16,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import core
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -115,7 +117,7 @@ class CachedTranslator:
     BATCH_CHARS = 1400     # и суммарно не длиннее стольки символов
 
     def __init__(self, src, dest, cache=None, delay=None, retries=5,
-                 log=None, on_progress=None):
+                 log=None, on_progress=None, batch_items=None, batch_chars=None):
         self.src = src
         self.dest = dest
         self.cache = cache if cache is not None else {}
@@ -123,6 +125,10 @@ class CachedTranslator:
         self.retries = retries
         self.log = log or (lambda msg: None)
         self.on_progress = on_progress or (lambda: None)
+        if batch_items is not None:
+            self.BATCH_ITEMS = batch_items
+        if batch_chars is not None:
+            self.BATCH_CHARS = batch_chars
         self.stats = {
             "requests": 0, "cache_hits": 0, "errors": 0, "rate_limit_hits": 0,
             "batch_requests": 0, "batched_lines": 0,
@@ -156,6 +162,18 @@ class CachedTranslator:
                 return text
             try:
                 result = raw_translate(text, self.src, self.dest)
+                if not core.tokens_preserved(text, result):
+                    # Google вернул ответ (не ошибку), но потерял/повредил
+                    # один из наших маркеров @@N@@ — кэшировать такое
+                    # нельзя: закэшированная порча будет "залипать"
+                    # навсегда. Пробуем ещё раз как обычную неудачу.
+                    self.log(
+                        "Перевод повредил защищённый маркер (тег/подстановку) "
+                        "— не сохраняю в кэш, пробую ещё раз "
+                        "(попытка {0}/{1})...".format(attempt, self.retries)
+                    )
+                    time.sleep(min(1.0 * attempt, 5.0))
+                    continue
                 self.cache[text] = result
                 self.stats["requests"] += 1
                 self._note_success()
@@ -189,7 +207,7 @@ class CachedTranslator:
 
         self.stats["errors"] += 1
         self.log("Не удалось перевести строку, оставляю оригинал: {0!r}".format(text[:60]))
-        return text
+        return None
 
     # ------------------------------------------------------------------
     # Пакетный перевод (несколько строк одним запросом) — сильно ускоряет
@@ -242,6 +260,18 @@ class CachedTranslator:
                 return True  # не считаем это неудачей, просто остановка
             try:
                 parts = raw_translate_batch(batch, self.src, self.dest)
+                bad = [
+                    src_text for src_text, translated in zip(batch, parts)
+                    if not core.tokens_preserved(src_text, translated)
+                ]
+                if bad:
+                    self.log(
+                        "Пакетный перевод повредил защищённый маркер "
+                        "(тег/подстановку) как минимум в одной строке из {0} — "
+                        "перевожу эту пачку по одной строке, чтобы не "
+                        "закэшировать испорченный результат.".format(len(batch))
+                    )
+                    return False
                 for src_text, translated in zip(batch, parts):
                     self.cache[src_text] = translated
                 self.stats["requests"] += 1
