@@ -23,11 +23,58 @@ import os
 import re
 import shutil
 
-# Шрифты, на которые ссылается добавляемый в gui.rpy блок. Если хотя бы
-# одного из них нет в игре после копирования — игра упадёт при запуске
-# с ошибкой "не найден шрифт", поэтому это проверяется явно.
-REGULAR_FONT = "fonts/4_LXGWWenKaiTC-Regular.ttf"
-BOLD_FONT = "fonts/4_LXGWWenKaiTC-Bold.ttf"
+# Раньше шрифты были зашиты жёстко (4_LXGWWenKaiTC-Regular/-Bold) — теперь
+# программа сама находит нужную пару файлов по универсальному суффиксу
+# имени "-Regular.ttf/.otf" и "-Bold.ttf/.otf" где угодно внутри папки
+# bundle_dir (обычно это game/fonts/...). Это позволяет подставить в игру
+# любой другой шрифт — достаточно положить в game/fonts ровно два файла
+# с такими суффиксами, остальное (сопутствующие файлы шрифтов для других
+# языков и т.п.) не трогается и не мешает поиску.
+_RE_REGULAR_FONT = re.compile(r'-Regular\.(ttf|otf)$', re.IGNORECASE)
+_RE_BOLD_FONT = re.compile(r'-Bold\.(ttf|otf)$', re.IGNORECASE)
+
+
+class FontsNotFoundError(Exception):
+    """Не удалось однозначно найти пару файлов шрифта (Regular/Bold) в
+    папке bundle_dir — либо ни одного подходящего файла, либо больше
+    одного кандидата (тогда программа не может сама угадать, какой из
+    них нужен)."""
+
+
+def _find_one_font(bundle_dir, pattern, suffix_label):
+    matches = []
+    for root, _dirs, files in os.walk(bundle_dir):
+        for name in files:
+            if pattern.search(name):
+                rel = os.path.relpath(os.path.join(root, name), bundle_dir)
+                matches.append(rel.replace(os.sep, "/"))
+    if not matches:
+        raise FontsNotFoundError(
+            "В папке {0} не найден файл шрифта с именем вида "
+            "\"*-{1}.ttf\" или \"*-{1}.otf\". Положите туда файл шрифта "
+            "с таким суффиксом в имени (например, \"MyFont-{1}.ttf\")."
+            .format(bundle_dir, suffix_label)
+        )
+    if len(matches) > 1:
+        raise FontsNotFoundError(
+            "В папке {0} найдено сразу несколько файлов с суффиксом "
+            "\"-{1}\": {2}. Оставьте там только один такой файл — "
+            "программа не может сама угадать, какой из них нужен "
+            "использовать.".format(bundle_dir, suffix_label, ", ".join(matches))
+        )
+    return matches[0]
+
+
+def find_font_files(bundle_dir):
+    """Ищет в bundle_dir пару файлов шрифта по суффиксам "-Regular" и
+    "-Bold" (расширение .ttf или .otf, регистр не важен). Возвращает
+    (regular_rel, bold_rel) — пути относительно bundle_dir с "/" вместо
+    os.sep (как их ожидает Ren'Py в gui.rpy). Бросает FontsNotFoundError
+    с понятным текстом, если файл не найден или найдено больше одного
+    кандидата на роль."""
+    regular = _find_one_font(bundle_dir, _RE_REGULAR_FONT, "Regular")
+    bold = _find_one_font(bundle_dir, _RE_BOLD_FONT, "Bold")
+    return regular, bold
 
 # Коды языков, с которыми работает программа, и их английские названия
 # для подписи кнопки в меню игры (так же называет их сам Ren'Py).
@@ -67,26 +114,26 @@ def _leading_ws(line):
 # gui.rpy — шрифты для выбранного языка
 # ---------------------------------------------------------------------------
 
-def font_block_lines(lang):
+def font_block_lines(lang, regular_font, bold_font):
     return [
         "translate {0} python:".format(lang),
         "",
-        '    gui.text_font = "{0}"'.format(REGULAR_FONT),
-        '    gui.button_text_font = "{0}"'.format(BOLD_FONT),
-        '    gui.name_text_font = "{0}"'.format(BOLD_FONT),
-        '    gui.interface_text_font = "{0}"'.format(REGULAR_FONT),
+        '    gui.text_font = "{0}"'.format(regular_font),
+        '    gui.button_text_font = "{0}"'.format(bold_font),
+        '    gui.name_text_font = "{0}"'.format(bold_font),
+        '    gui.interface_text_font = "{0}"'.format(regular_font),
         "",
-        '    gui.default_font = "{0}"'.format(REGULAR_FONT),
-        '    gui.name_font = "{0}"'.format(BOLD_FONT),
-        '    gui.credit_font = "{0}"'.format(REGULAR_FONT),
-        '    gui.main_menu_button_text_font = "{0}"'.format(REGULAR_FONT),
-        '    gui.interface_font = "{0}"'.format(REGULAR_FONT),
+        '    gui.default_font = "{0}"'.format(regular_font),
+        '    gui.name_font = "{0}"'.format(bold_font),
+        '    gui.credit_font = "{0}"'.format(regular_font),
+        '    gui.main_menu_button_text_font = "{0}"'.format(regular_font),
+        '    gui.interface_font = "{0}"'.format(regular_font),
         "",
-        '    gui.choice_button_text_font = "{0}"'.format(BOLD_FONT),
+        '    gui.choice_button_text_font = "{0}"'.format(bold_font),
     ]
 
 
-def patch_gui_text(text, lang):
+def patch_gui_text(text, lang, regular_font, bold_font):
     """Добавляет в конец текста gui.rpy блок шрифтов для языка lang.
     Возвращает (статус, новый_текст). ALREADY — блок для этого языка
     уже есть (свой, добавленный ранее или вручную)."""
@@ -98,7 +145,7 @@ def patch_gui_text(text, lang):
     # Ровно одна пустая строка между старым содержимым и новым блоком.
     if text and not re.search(r'(?:\r?\n)[ \t]*\r?\n\Z', text):
         text += nl
-    return DONE, text + nl.join(font_block_lines(lang)) + nl
+    return DONE, text + nl.join(font_block_lines(lang, regular_font, bold_font)) + nl
 
 
 # ---------------------------------------------------------------------------
@@ -243,11 +290,11 @@ def copy_bundle(src_game_dir, dst_game_dir, log=None):
     return count
 
 
-def missing_fonts(game_dir):
-    """Список шрифтов, на которые ссылается блок в gui.rpy, но которых
-    нет в папке игры."""
+def missing_fonts(game_dir, regular_font, bold_font):
+    """Список шрифтов (из пары regular_font/bold_font), на которые
+    ссылается блок в gui.rpy, но которых нет в папке игры."""
     result = []
-    for rel in (REGULAR_FONT, BOLD_FONT):
+    for rel in (regular_font, bold_font):
         if not os.path.isfile(os.path.join(game_dir, *rel.split("/"))):
             result.append(rel)
     return result
@@ -261,6 +308,16 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
     name = LANGUAGE_NAMES[lang]
     result = {"fonts": "error", "gui": "skipped", "screens": "skipped"}
 
+    # --- 0. определяем, какая пара файлов шрифта лежит в bundle_dir ----
+    # (ищем по суффиксам "-Regular"/"-Bold" в имени файла — так это
+    # работает для любого шрифта, а не только для одного зашитого).
+    try:
+        regular_font, bold_font = find_font_files(bundle_dir)
+    except FontsNotFoundError as e:
+        log(str(e))
+        return result
+    log("Найдена пара шрифтов: {0} / {1}.".format(regular_font, bold_font))
+
     # --- 1. шрифты -----------------------------------------------------
     log("1/3. Копирую шрифты в папку игры...")
     try:
@@ -269,7 +326,7 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
         log("  ОШИБКА копирования: {0}".format(e))
         return result
     log("  Скопировано файлов: {0} (в {1}).".format(count, game_dir))
-    missing = missing_fonts(game_dir)
+    missing = missing_fonts(game_dir, regular_font, bold_font)
     if missing:
         log(
             "  ОШИБКА: после копирования в игре нет шрифтов, на которые "
@@ -289,7 +346,7 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
         )
     else:
         try:
-            status, new_text = patch_gui_text(read_text(gui_path), lang)
+            status, new_text = patch_gui_text(read_text(gui_path), lang, regular_font, bold_font)
             if status == ALREADY:
                 log(
                     "  В gui.rpy уже есть блок «translate {0} python:» — "
