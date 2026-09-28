@@ -41,6 +41,7 @@ import libretranslate_translate
 import project
 import renpy_sdk
 import rpa_tools
+import rpy_autofix
 import unrpyc_manager
 
 APP_TITLE = "Universal RenPy Translator"
@@ -716,6 +717,27 @@ class App(tk.Tk):
                     "нестандартных .rpyc)."
                     .format(real_missing)
                 )
+            self._log("")
+            self._log(
+                "Проверяю раскомпилированные .rpy на известные ошибки "
+                "unrpyc (актуально для игр на Ren'Py 7 и ниже — сама "
+                "раскомпиляция ведётся версией для Ren'Py 8)..."
+            )
+            fix_stats = rpy_autofix.scan_and_fix(self.game_dir, log=self._log)
+            total_fixes = sum(fix_stats["fixes"].values())
+            if total_fixes:
+                self._log(
+                    "Исправлено автоматически: {0} (в {1} файлах). Правки, "
+                    "помеченные [ТРЕБУЕТ ПРОВЕРКИ ГЛАЗАМИ] выше в журнале, "
+                    "стоит выборочно свериться с игрой — сами исправления "
+                    "проверены на конкретных случаях, но не железно "
+                    "гарантированы для любого текста.".format(
+                        total_fixes, fix_stats["files_changed"]
+                    )
+                )
+            else:
+                self._log("Известных ошибок unrpyc не найдено.")
+
             self._log(
                 "Готово. Теперь можно сгенерировать файлы перевода: "
                 "кнопкой «Сгенерировать файлы перевода» выше (если указана "
