@@ -31,7 +31,14 @@ _LAUNCHER_NAMES = ["renpy.exe", "renpy.sh", "renpy.py"]
 
 
 class RenpySdkError(Exception):
-    pass
+    def __init__(self, message, output_lines=None):
+        super().__init__(message)
+        # Сырой (без нашего префикса "  [renpy] ") построчный вывод SDK —
+        # нужен вызывающему коду (GUI), чтобы разобрать в нём конкретные
+        # места ошибок парсера (файл + номер строки) и попытаться их
+        # точечно починить (см. rpy_autofix.py). Пусто, если процесс SDK
+        # вообще не запускался (например, не найден сам исполняемый файл).
+        self.output_lines = output_lines or []
 
 
 def find_launcher(sdk_dir):
@@ -69,15 +76,18 @@ def generate_translations(project_dir, sdk_dir, renpy_lang_name, log=None, timeo
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
     )
+    output_lines = []
     for line in proc.stdout:
         line = line.rstrip()
         if line:
+            output_lines.append(line)
             log("  [renpy] " + line)
     proc.wait(timeout=timeout)
     if proc.returncode != 0:
         raise RenpySdkError(
             "Ren'Py SDK завершился с ошибкой (код {0}). Смотрите "
             "сообщения выше в журнале — обычно это неверно указанная "
-            "папка проекта/SDK либо несовместимая версия SDK.".format(proc.returncode)
+            "папка проекта/SDK либо несовместимая версия SDK.".format(proc.returncode),
+            output_lines=output_lines,
         )
     return proc.returncode

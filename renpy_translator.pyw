@@ -29,6 +29,7 @@ DeepL или локальный LibreTranslate.
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -103,6 +104,16 @@ ENGINE_DEFAULTS = {
         "delay": libretranslate_translate.LibreTranslator.BASE_DELAY,
     },
 }
+
+
+class _GenerateResult:
+    """Результат одного запуска renpy_sdk.generate_translations() —
+    удобная обёртка, чтобы _generate_tl_worker мог организовать несколько
+    попыток подряд, не полагаясь на исключения для управления потоком."""
+
+    def __init__(self, ok, output_lines):
+        self.ok = ok
+        self.output_lines = output_lines
 
 
 class App(tk.Tk):
@@ -394,16 +405,18 @@ class App(tk.Tk):
         if not content.strip():
             messagebox.showinfo("Журнал пуст", "Пока нечего сохранять.")
             return
-        default_dir = self.script_dir
-        path = filedialog.asksaveasfilename(
-            title="Сохранить журнал",
-            initialdir=default_dir,
-            initialfile="renpy_translator_log.txt",
-            defaultextension=".txt",
-            filetypes=[("Текстовые файлы", "*.txt"), ("Все файлы", "*.*")],
-        )
-        if not path:
+        logs_dir = os.path.join(self.script_dir, "logs")
+        try:
+            os.makedirs(logs_dir, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror("Ошибка", "Не удалось создать папку logs: {0}".format(e))
             return
+        raw_name = os.path.basename(os.path.normpath(self.project_path.get())) \
+            if self.project_path.get() else ""
+        game_name = raw_name or "game"
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        filename = "{0}_{1}.txt".format(timestamp, game_name)
+        path = os.path.join(logs_dir, filename)
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -719,26 +732,6 @@ class App(tk.Tk):
                 )
             self._log("")
             self._log(
-                "Проверяю раскомпилированные .rpy на известные ошибки "
-                "unrpyc (актуально для игр на Ren'Py 7 и ниже — сама "
-                "раскомпиляция ведётся версией для Ren'Py 8)..."
-            )
-            fix_stats = rpy_autofix.scan_and_fix(self.game_dir, log=self._log)
-            total_fixes = sum(fix_stats["fixes"].values())
-            if total_fixes:
-                self._log(
-                    "Исправлено автоматически: {0} (в {1} файлах). Правки, "
-                    "помеченные [ТРЕБУЕТ ПРОВЕРКИ ГЛАЗАМИ] выше в журнале, "
-                    "стоит выборочно свериться с игрой — сами исправления "
-                    "проверены на конкретных случаях, но не железно "
-                    "гарантированы для любого текста.".format(
-                        total_fixes, fix_stats["files_changed"]
-                    )
-                )
-            else:
-                self._log("Известных ошибок unrpyc не найдено.")
-
-            self._log(
                 "Готово. Теперь можно сгенерировать файлы перевода: "
                 "кнопкой «Сгенерировать файлы перевода» выше (если указана "
                 "папка SDK), либо вручную через меню разработчика в игре."
@@ -787,21 +780,166 @@ class App(tk.Tk):
 
     def _generate_tl_worker(self, sdk_dir, renpy_lang):
         try:
+            project_dir = self.project_path.get()
             self._log(
                 "Запускаю Ren'Py SDK для генерации файлов перевода "
                 "(язык: {0})...".format(renpy_lang)
             )
-            renpy_sdk.generate_translations(
-                self.project_path.get(), sdk_dir, renpy_lang, log=self._log,
-            )
+            result = self._run_generate_translations_once(project_dir, sdk_dir, renpy_lang)
+            if result.ok:
+                self._log("")
+                self._log("Готово. Языковая папка создана.")
+                return
+
+            # --- Попытка №1 провалилась — ищем в выводе SDK конкретные
+            # места ошибок (файл + номер строки) и точечно чиним только
+            # их, не трогая остальной файл (см. rpy_autofix.py про то,
+            # почему НЕ сканируем файлы целиком). ------------------------
+            locations_1 = rpy_autofix.parse_renpy_error_locations(result.output_lines)
+            if not locations_1:
+                self._log("")
+                self._log(
+                    "Не удалось разобрать сообщение SDK на конкретные места "
+                    "(файл/строка) — почините вручную по журналу выше."
+                )
+                return
+
             self._log("")
-            self._log("Готово. Языковая папка создана")
-        except renpy_sdk.RenpySdkError as e:
-            self._log("ОШИБКА: {0}".format(e))
+            self._log(
+                "Обнаружено проблемных мест: {0}. Пробую точечно "
+                "исправить известные ошибки unrpyc и повторить "
+                "генерацию...".format(len(locations_1))
+            )
+            self._apply_targeted_fixes(project_dir, locations_1)
+
+            self._log("")
+            self._log("Повторяю генерацию файлов перевода (попытка 2)...")
+            result2 = self._run_generate_translations_once(project_dir, sdk_dir, renpy_lang)
+            if result2.ok:
+                self._log("")
+                self._log("Готово. Языковая папка создана (после автоисправления).")
+                return
+
+            # --- Попытка №2 тоже провалилась. Если ошибка осталась
+            # ровно на тех же местах (файл+строка), что и в попытке 1 —
+            # значит, точечная правка её не решила (или строка не
+            # подошла ни под одно правило) — такие строки удаляем
+            # целиком, чтобы SDK мог продолжить работу дальше. Новые
+            # места, которых не было в попытке 1, не трогаем — их могло
+            # заслонять более раннее место ошибки в том же файле. -------
+            locations_2 = rpy_autofix.parse_renpy_error_locations(result2.output_lines)
+            keys_1 = {(loc["file"], loc["line"]) for loc in locations_1}
+            keys_2 = {(loc["file"], loc["line"]) for loc in locations_2}
+            still_broken = keys_1 & keys_2
+
+            self._log("")
+            if still_broken:
+                self._log(
+                    "На {0} месте(ах) ошибка сохранилась на той же строке "
+                    "после попытки исправления — удаляю эти строки целиком "
+                    "(проверьте эти места в игре вручную после перевода):"
+                    .format(len(still_broken))
+                )
+                self._delete_lines(project_dir, still_broken)
+            else:
+                self._log(
+                    "Прежние места исправлены, но обнаружились новые "
+                    "ошибки в других местах — удалять нечего, перехожу к "
+                    "финальной попытке как есть."
+                )
+
+            self._log("")
+            self._log("Финальная попытка сгенерировать файлы перевода (попытка 3)...")
+            result3 = self._run_generate_translations_once(project_dir, sdk_dir, renpy_lang)
+            self._log("")
+            if result3.ok:
+                self._log("Готово. Языковая папка создана (после удаления неисправимых строк).")
+            else:
+                self._log(
+                    "Не удалось сгенерировать файлы перевода даже после "
+                    "автоисправлений — смотрите сообщения об ошибках выше, "
+                    "оставшиеся места придётся поправить вручную."
+                )
         except Exception as e:
             self._log("Неожиданная ошибка при запуске Ren'Py SDK: {0}".format(e))
         finally:
             self.log_queue.put("__GENERATE_TL_DONE__")
+
+    def _run_generate_translations_once(self, project_dir, sdk_dir, renpy_lang):
+        """Один запуск renpy_sdk.generate_translations(). Не бросает
+        исключение наружу — возвращает объект с .ok/.output_lines, чтобы
+        вызывающий код (_generate_tl_worker) мог организовать повторные
+        попытки. Само сообщение об ошибке (если есть) всегда попадает в
+        журнал здесь же, независимо от того, будет ли повтор."""
+        try:
+            renpy_sdk.generate_translations(project_dir, sdk_dir, renpy_lang, log=self._log)
+            return _GenerateResult(True, [])
+        except renpy_sdk.RenpySdkError as e:
+            self._log("ОШИБКА: {0}".format(e))
+            return _GenerateResult(False, e.output_lines)
+
+    def _apply_targeted_fixes(self, project_dir, locations):
+        """Пытается починить каждое место из locations (список dict с
+        'file'/'line'/'message') по отдельности, читая и перезаписывая
+        только тот .rpy файл, где оно находится. Каждый результат (успех
+        или "не подошло ни одно правило") пишет в журнал."""
+        for loc in locations:
+            path = os.path.join(project_dir, *loc["file"].split("/"))
+            try:
+                with open(path, "r", encoding="utf-8", newline="") as f:
+                    lines = f.readlines()
+            except Exception as e:
+                self._log("  {0}: ОШИБКА чтения ({1})".format(loc["file"], e))
+                continue
+            new_lines, desc = rpy_autofix.apply_fix_at_line(lines, loc["line"])
+            if desc is None:
+                self._log(
+                    "  {0}, строка {1}: не подошло ни одно известное "
+                    "правило автоисправления ({2})"
+                    .format(loc["file"], loc["line"], loc["message"])
+                )
+                continue
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as f:
+                    f.writelines(new_lines)
+            except Exception as e:
+                self._log("  {0}: ОШИБКА записи ({1})".format(loc["file"], e))
+                continue
+            self._log("  {0}, строка {1}: {2}".format(loc["file"], loc["line"], desc))
+
+    def _delete_lines(self, project_dir, keys):
+        """Удаляет строки, перечисленные в keys (множество пар
+        (file_rel, line_no)), целиком из соответствующих файлов. Строки
+        внутри одного файла удаляются от конца к началу, чтобы номера
+        остальных удаляемых строк не съезжали по ходу удаления."""
+        by_file = {}
+        for file_rel, line_no in keys:
+            by_file.setdefault(file_rel, []).append(line_no)
+
+        for file_rel, line_nos in by_file.items():
+            path = os.path.join(project_dir, *file_rel.split("/"))
+            try:
+                with open(path, "r", encoding="utf-8", newline="") as f:
+                    lines = f.readlines()
+            except Exception as e:
+                self._log("  {0}: ОШИБКА чтения ({1})".format(file_rel, e))
+                continue
+            removed = []
+            for line_no in sorted(set(line_nos), reverse=True):
+                lines, text = rpy_autofix.delete_line(lines, line_no)
+                if text is not None:
+                    removed.append((line_no, text))
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as f:
+                    f.writelines(lines)
+            except Exception as e:
+                self._log("  {0}: ОШИБКА записи ({1})".format(file_rel, e))
+                continue
+            for line_no, text in sorted(removed):
+                self._log(
+                    "  {0}, строка {1}: строка удалена целиком — было: {2!r}"
+                    .format(file_rel, line_no, text)
+                )
 
     # ------------------------------------------------------------------
     # Запуск локального сервера LibreTranslate
