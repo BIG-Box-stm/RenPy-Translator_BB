@@ -89,6 +89,57 @@ _RE_DECOMPILED = re.compile(r'>\s*(\d+) files were successfully decompiled')
 _RE_SKIPPED = re.compile(r'>\s*(\d+) files were skipped')
 
 
+def find_and_remove_ren_py_conflicts(game_dir, log=None):
+    """Ren'Py поддерживает файлы вида "<имя>_ren.py" как альтернативное
+    ("исходниковое") представление скомпилированного .rpy-скрипта — этот
+    суффикс исторически использовали некоторые сторонние инструменты
+    декомпиляции/моддинга (не unrpyc — он выдаёт только .rpy). Если в
+    одной папке лежат ОБА файла — "<имя>_ren.py" и "<имя>.rpy"/"<имя>.rpyc" —
+    Ren'Py отказывается запускаться вообще, с ошибкой вида "X and Y
+    conflict, and can't exist in the same game." Встречается на играх,
+    которые уже проходили через сторонний мод/распаковку ДО этой
+    программы — конфликтующий файл остаётся "осиротевшим" артефактом той
+    обработки, программа сама его не создаёт.
+
+    Поскольку присутствие обоих файлов гарантированно ломает игру (иного
+    исхода тут не бывает — это не наша догадка, а собственная проверка
+    Ren'Py при запуске), лишний "_ren.py" удаляется автоматически, с явной
+    записью в журнал, что и почему удалено. Возвращает список удалённых
+    путей."""
+    log = log or (lambda msg: None)
+    removed = []
+    for root, _dirs, files in os.walk(game_dir):
+        lower_map = {f.lower(): f for f in files}
+        for f in files:
+            if not f.lower().endswith("_ren.py"):
+                continue
+            base = f[:-len("_ren.py")]
+            for sibling_ext in (".rpy", ".rpyc"):
+                sibling_lower = (base + sibling_ext).lower()
+                if sibling_lower not in lower_map:
+                    continue
+                ren_path = os.path.join(root, f)
+                sibling_path = os.path.join(root, lower_map[sibling_lower])
+                try:
+                    os.remove(ren_path)
+                except Exception as e:
+                    log(
+                        "  ОШИБКА: не удалось удалить конфликтующий {0}: {1}"
+                        .format(ren_path, e)
+                    )
+                    break
+                removed.append(ren_path)
+                log(
+                    "  Удалён {0} — конфликтует с {1} (Ren'Py не может "
+                    "загрузить оба сразу и отказывается запускаться; "
+                    "такой конфликт остаётся, если игра уже была "
+                    "распакована/пропатчена сторонним инструментом до "
+                    "этой программы).".format(ren_path, sibling_path)
+                )
+                break
+    return removed
+
+
 def _find_rpy_targets(game_dir):
     """Для каждого .rpyc в игре возвращает ожидаемый путь итогового
     .rpy (тот же путь, но с .rpy вместо .rpyc)."""

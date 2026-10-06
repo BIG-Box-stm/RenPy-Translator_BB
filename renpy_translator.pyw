@@ -37,6 +37,7 @@ from tkinter import filedialog, messagebox, ttk
 import character_names
 import core
 import deepl_translate
+import eta
 import game_patcher
 import gemma_launcher
 import gtranslate
@@ -146,6 +147,11 @@ class App(tk.Tk):
         self.dest_lang_var = tk.StringVar(value="Русский")
         self.overwrite_var = tk.BooleanVar(value=False)
         self.use_cache_var = tk.BooleanVar(value=True)
+        # Не сохраняется между запусками программы намеренно — при
+        # закрытии/открытии программы имена в самой игре остаются такими,
+        # какими их оставили в прошлый раз; чтобы их вернуть, галочку
+        # нужно снять руками (см. _on_translate_names_toggled).
+        self.translate_names_var = tk.BooleanVar(value=False)
         self.engine_var = tk.StringVar(value="Google Translate (без ключа)")
         self.deepl_key_var = tk.StringVar()
         self.libre_url_var = tk.StringVar(value=libretranslate_translate.DEFAULT_URL)
@@ -154,8 +160,8 @@ class App(tk.Tk):
         self.renpy_lang_var = tk.StringVar(value="ru")
 
         # --- Translate Gemma (см. group_gemma в _build_ui) -------------
-        self.gemma_llama_folder_var = tk.StringVar()
-        self.gemma_model_path_var = tk.StringVar()
+        self.gemma_llama_folder_var = tk.StringVar(value=self.settings.get("gemma_llama_folder", ""))
+        self.gemma_model_path_var = tk.StringVar(value=self.settings.get("gemma_model_path", ""))
         self.gemma_ngl_var = tk.StringVar()
         self.gemma_np_var = tk.StringVar()
         self.gemma_ctx_var = tk.StringVar()
@@ -167,6 +173,12 @@ class App(tk.Tk):
         self.worker_thread = None
         self.translator = None
         self.stop_requested = False
+        # Состояние прогноза времени (см. eta.py и _refresh_eta): момент
+        # старта счётчика и последние известные (сделано, всего) строк.
+        # Обновляется только из главного потока (_poll_queue).
+        self._eta_start = None
+        self._eta_done = 0
+        self._eta_total = 0
 
         self._build_ui()
         self._on_engine_changed()
@@ -292,12 +304,15 @@ class App(tk.Tk):
             row_gemma_folder, text="Обзор...", command=self._choose_gemma_llama_folder,
         ).pack(side="left", padx=(6, 0))
 
-        ttk.Entry(self.group_gemma, textvariable=self.gemma_ngl_var, width=8).grid(
-            row=1, column=1, sticky="w", padx=(16, 0), pady=(2, 0)
-        )
-        ttk.Entry(self.group_gemma, textvariable=self.gemma_np_var, width=8).grid(
-            row=1, column=2, sticky="w", padx=(16, 0), pady=(2, 0)
-        )
+        row_ngl = ttk.Frame(self.group_gemma)
+        row_ngl.grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(2, 0))
+        ttk.Entry(row_ngl, textvariable=self.gemma_ngl_var, width=8).pack(side="left")
+        ttk.Label(row_ngl, text="-ngl").pack(side="left", padx=(4, 0))
+
+        row_np = ttk.Frame(self.group_gemma)
+        row_np.grid(row=1, column=2, sticky="w", padx=(16, 0), pady=(2, 0))
+        ttk.Entry(row_np, textvariable=self.gemma_np_var, width=8).pack(side="left")
+        ttk.Label(row_np, text="-np").pack(side="left", padx=(4, 0))
 
         ttk.Label(self.group_gemma, text="Модель Translate Gemma .gguf:").grid(
             row=2, column=0, sticky="w", padx=8, pady=(8, 0)
@@ -318,12 +333,16 @@ class App(tk.Tk):
             row_gemma_model, text="Обзор...", command=self._choose_gemma_model_file,
         ).pack(side="left", padx=(6, 0))
 
-        ttk.Entry(self.group_gemma, textvariable=self.gemma_ctx_var, width=8).grid(
-            row=3, column=1, sticky="w", padx=(16, 0), pady=(2, 0)
-        )
-        ttk.Entry(self.group_gemma, textvariable=self.gemma_ntokens_var, width=8).grid(
-            row=3, column=2, sticky="w", padx=(16, 0), pady=(2, 0)
-        )
+        row_ctx = ttk.Frame(self.group_gemma)
+        row_ctx.grid(row=3, column=1, sticky="w", padx=(16, 0), pady=(2, 0))
+        ttk.Entry(row_ctx, textvariable=self.gemma_ctx_var, width=8).pack(side="left")
+        ttk.Label(row_ctx, text="-c").pack(side="left", padx=(4, 0))
+
+        row_n = ttk.Frame(self.group_gemma)
+        row_n.grid(row=3, column=2, sticky="w", padx=(16, 0), pady=(2, 0))
+        ttk.Entry(row_n, textvariable=self.gemma_ntokens_var, width=8).pack(side="left")
+        ttk.Label(row_n, text="-n").pack(side="left", padx=(4, 0))
+
 
         ttk.Label(
             self.group_gemma,
@@ -412,6 +431,11 @@ class App(tk.Tk):
             frame_opts, text="Использовать кэш переводов (ускоряет повторный запуск)",
             variable=self.use_cache_var,
         ).grid(row=0, column=1, sticky="w", padx=(20, 0))
+        self.translate_names_check = ttk.Checkbutton(
+            frame_opts, text="Переводить имена",
+            variable=self.translate_names_var, command=self._on_translate_names_toggled,
+        )
+        self.translate_names_check.grid(row=0, column=2, sticky="w", padx=(20, 0))
 
         frame_btns_left = ttk.Frame(frame_opts)
         frame_btns_left.grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -427,7 +451,11 @@ class App(tk.Tk):
         self.update_fonts_btn.grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(8, 0))
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(self, textvariable=self.status_var).pack(anchor="w", padx=8)
+        self.eta_var = tk.StringVar(value="")
+        row_status = ttk.Frame(self)
+        row_status.pack(fill="x", padx=8)
+        ttk.Label(row_status, textvariable=self.status_var).pack(side="left")
+        ttk.Label(row_status, textvariable=self.eta_var).pack(side="right")
         self.progress = ttk.Progressbar(self, mode="determinate")
         self.progress.pack(fill="x", **pad)
 
@@ -471,6 +499,8 @@ class App(tk.Tk):
         )
         if path:
             self.gemma_llama_folder_var.set(path)
+            self.settings["gemma_llama_folder"] = path
+            project.save_settings(self.settings_path, self.settings)
 
     def _choose_gemma_model_file(self):
         path = filedialog.askopenfilename(
@@ -479,6 +509,8 @@ class App(tk.Tk):
         )
         if path:
             self.gemma_model_path_var.set(path)
+            self.settings["gemma_model_path"] = path
+            project.save_settings(self.settings_path, self.settings)
 
     def _int_or_default(self, raw, default, field_label):
         """Разбирает содержимое числового поля GUI: пустая строка →
@@ -492,6 +524,74 @@ class App(tk.Tk):
             return int(raw)
         except ValueError:
             raise ValueError("«{0}» должно быть целым числом.".format(field_label))
+
+    # ------------------------------------------------------------------
+    # Чек-бокс «Переводить имена» — подменяет/возвращает имена персонажей
+    # (и, где задан свой шрифт, шрифт для имени) прямо в исходниках игры.
+    # Срабатывает сразу по клику, а не при "Начать перевод" — см.
+    # обсуждение в handoff-документе.
+    # ------------------------------------------------------------------
+    def _on_translate_names_toggled(self):
+        use_translated = self.translate_names_var.get()
+        if not self.game_dir:
+            messagebox.showerror("Ошибка", "Сначала выберите папку игры.")
+            self.translate_names_var.set(not use_translated)
+            return
+        lang_folder = self.lang_var.get()
+        if not lang_folder or not self.tl_dir:
+            messagebox.showerror("Ошибка", "Выберите языковую папку перевода.")
+            self.translate_names_var.set(not use_translated)
+            return
+        lang_dir = os.path.join(self.tl_dir, lang_folder)
+        character_names.migrate_legacy_names_file(lang_dir, log=self._log)
+        names_path = os.path.join(lang_dir, character_names.NAMES_FILENAME)
+        self.translate_names_check.configure(state="disabled")
+        threading.Thread(
+            target=self._apply_names_worker, args=(names_path, use_translated), daemon=True,
+        ).start()
+
+    def _apply_names_worker(self, names_path, use_translated):
+        try:
+            entries = character_names.parse_names_file(names_path)
+            if not entries:
+                self._log(
+                    "Файл имён персонажей не найден или пуст ({0}). Сначала "
+                    "нажмите «Сгенерировать файлы перевода» (он соберёт "
+                    "имена), переведите файл {1} тем же способом, что и "
+                    "остальные строки, и только потом включайте эту "
+                    "галочку.".format(names_path, character_names.NAMES_FILENAME)
+                )
+                return
+
+            light_font = None
+            if use_translated and os.path.isdir(self.fonts_bundle_dir):
+                try:
+                    light_font = game_patcher.find_light_font(self.fonts_bundle_dir)
+                except game_patcher.FontsNotFoundError as e:
+                    self._log("ОШИБКА: {0}".format(e))
+
+            self._log(
+                "{0} имена персонажей ({1} записей в файле)..."
+                .format(
+                    "Применяю переведённые" if use_translated else "Возвращаю оригинальные",
+                    len(entries),
+                )
+            )
+            stats = character_names.apply_character_names(
+                self.game_dir, entries, use_translated,
+                light_font_rel=light_font, log=self._log,
+            )
+            self._log(
+                "Готово: применено — {0} из {1}{2}.".format(
+                    stats["changed"], len(entries),
+                    ", не переведено (пропущено): {0}".format(stats["untranslated"])
+                    if stats["untranslated"] else "",
+                )
+            )
+        except Exception as e:
+            self._log("Неожиданная ошибка при работе с именами персонажей: {0}".format(e))
+        finally:
+            self.log_queue.put(("__ENABLE_WIDGET__", "translate_names_check"))
 
     def _refresh_project_dirs(self, show_warnings):
         """Обновляет self.game_dir/self.tl_dir и связанные элементы UI
@@ -679,6 +779,12 @@ class App(tk.Tk):
                     self.status_var.set(
                         "Перевод строк: {0} / {1}".format(done, total)
                     )
+                    # Сообщение (0, total) приходит прямо перед началом
+                    # перевода — от него и отсчитываем прошедшее время.
+                    if done == 0 or self._eta_start is None:
+                        self._eta_start = time.monotonic()
+                    self._eta_done = done
+                    self._eta_total = total
                     continue
                 if isinstance(msg, tuple) and msg[0] == "__PHASE2_PROGRESS__":
                     _, idx, total, rel = msg
@@ -686,12 +792,57 @@ class App(tk.Tk):
                     self.status_var.set(
                         "Файл {0} / {1}: {2}".format(idx, total, rel)
                     )
+                    # Фаза расстановки готовых переводов по файлам почти
+                    # мгновенная — прогнозировать там нечего.
+                    self._reset_eta()
                     continue
                 self.log_text.insert("end", msg + "\n")
                 self.log_text.see("end")
         except queue.Empty:
             pass
+        self._refresh_eta()
         self.after(100, self._poll_queue)
+
+    def _reset_eta(self):
+        self._eta_start = None
+        self._eta_done = 0
+        self._eta_total = 0
+        self.eta_var.set("")
+
+    def _refresh_eta(self):
+        """Обновляет подпись «Времени до завершения» — вызывается на
+        каждом обороте опроса очереди (раз в 100 мс), поэтому обратный
+        отсчёт идёт плавно, даже когда новых строк долго нет."""
+        if self._eta_start is None:
+            return
+        elapsed = time.monotonic() - self._eta_start
+        self.eta_var.set(eta.eta_text(self._eta_done, self._eta_total, elapsed))
+
+    def _ensure_character_names_file(self):
+        """Синхронно досоздаёт/обновляет game/tl/<язык>/_character_names.txt
+        прямо перед стартом перевода (плюс переносит файл со старого,
+        ошибочного имени .rpy, если он остался от прошлой версии
+        программы — см. character_names.migrate_legacy_names_file()).
+        Нужно на случай, если языковая папка была сгенерирована ДО
+        появления в программе этой функции (или сам файл имён по
+        какой-то причине не создался при «Сгенерировать файлы
+        перевода») — тогда без этого файл так и не появился бы, а
+        «Начать перевод» никак бы об этом не предупредил. Дешёвая
+        операция (сканирование game/ и сравнение с уже известными
+        кодами), поэтому безопасно делать синхронно, до запуска
+        фонового потока перевода."""
+        if not self.game_dir:
+            return
+        lang_folder = self.lang_var.get()
+        if not lang_folder:
+            return
+        lang_dir = os.path.join(self.game_dir, "tl", lang_folder)
+        character_names.migrate_legacy_names_file(lang_dir, log=self._log)
+        names_path = os.path.join(lang_dir, character_names.NAMES_FILENAME)
+        try:
+            character_names.update_character_names_file(self.game_dir, names_path, log=self._log)
+        except Exception as e:
+            self._log("ОШИБКА при сборе имён персонажей: {0}".format(e))
 
     def _start(self):
         if not self.tl_dir:
@@ -711,8 +862,18 @@ class App(tk.Tk):
             ):
                 return
 
+        self._ensure_character_names_file()
+
         lang_dir = os.path.join(self.tl_dir, lang_folder)
         files = project.find_rpy_files(lang_dir)
+        # Файл имён персонажей намеренно НЕ .rpy (иначе Ren'Py парсит его
+        # как часть сценария игры и падает — см. character_names.py), так
+        # что поиск по *.rpy выше его не находит. Для самого перевода
+        # расширение не важно (core.py работает по содержимому строк, а не
+        # по имени файла), поэтому просто добавляем его в список явно.
+        names_path = os.path.join(lang_dir, character_names.NAMES_FILENAME)
+        if os.path.isfile(names_path) and names_path not in files:
+            files.append(names_path)
         if not files:
             messagebox.showinfo("Нет файлов", "В выбранной языковой папке нет .rpy файлов.")
             return
@@ -843,6 +1004,7 @@ class App(tk.Tk):
     def _on_finished(self):
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
+        self._reset_eta()
 
     def _start_prepare(self):
         if not self.game_dir:
@@ -932,6 +1094,16 @@ class App(tk.Tk):
                     .format(real_missing)
                 )
             self._log("")
+            ren_conflicts = unrpyc_manager.find_and_remove_ren_py_conflicts(
+                self.game_dir, log=self._log
+            )
+            if ren_conflicts:
+                self._log(
+                    "Обнаружены и удалены конфликтующие файлы _ren.py "
+                    "(см. выше) — без этого Ren'Py отказался бы "
+                    "запускать игру."
+                )
+
             self._log(
                 "Готово. Теперь можно сгенерировать файлы перевода: "
                 "кнопкой «Сгенерировать файлы перевода» выше (если указана "
@@ -990,6 +1162,7 @@ class App(tk.Tk):
             if result.ok:
                 self._log("")
                 self._log("Готово. Языковая папка создана.")
+                self._extract_character_names_step(project_dir, renpy_lang)
                 return
 
             # --- Попытка №1 провалилась — ищем в выводе SDK конкретные
@@ -1019,6 +1192,7 @@ class App(tk.Tk):
             if result2.ok:
                 self._log("")
                 self._log("Готово. Языковая папка создана (после автоисправления).")
+                self._extract_character_names_step(project_dir, renpy_lang)
                 return
 
             # --- Попытка №2 тоже провалилась. Если ошибка осталась
@@ -1055,6 +1229,7 @@ class App(tk.Tk):
             self._log("")
             if result3.ok:
                 self._log("Готово. Языковая папка создана (после удаления неисправимых строк).")
+                self._extract_character_names_step(project_dir, renpy_lang)
             else:
                 self._log(
                     "Не удалось сгенерировать файлы перевода даже после "
@@ -1065,6 +1240,30 @@ class App(tk.Tk):
             self._log("Неожиданная ошибка при запуске Ren'Py SDK: {0}".format(e))
         finally:
             self.log_queue.put("__GENERATE_TL_DONE__")
+
+    def _extract_character_names_step(self, project_dir, renpy_lang):
+        """Собирает определения персонажей (define ... = Character(...))
+        в game/tl/<язык>/_character_names.txt сразу после успешной
+        генерации файлов перевода. Файл намеренно НЕ .rpy — Ren'Py
+        парсит любой .rpy внутри game/ как часть сценария и падает на
+        служебной строке who_font=... (см. character_names.py). При
+        «Начать перевод» этот файл добавляется в список на перевод
+        явно, по имени (см. _start()), а не через поиск по *.rpy."""
+        game_dir = project.find_game_dir(project_dir)
+        if not game_dir:
+            self._log(
+                "Не удалось определить папку game — сбор имён персонажей "
+                "пропущен."
+            )
+            return
+        lang_dir = os.path.join(game_dir, "tl", renpy_lang)
+        character_names.migrate_legacy_names_file(lang_dir, log=self._log)
+        names_path = os.path.join(lang_dir, character_names.NAMES_FILENAME)
+        self._log("Собираю имена персонажей (define ... = Character(...))...")
+        try:
+            character_names.update_character_names_file(game_dir, names_path, log=self._log)
+        except Exception as e:
+            self._log("  ОШИБКА при сборе имён персонажей: {0}".format(e))
 
     def _run_generate_translations_once(self, project_dir, sdk_dir, renpy_lang):
         """Один запуск renpy_sdk.generate_translations(). Не бросает
@@ -1360,8 +1559,14 @@ class App(tk.Tk):
         )
         if all_needed:
             self._log("Перевожу пачками (несколько строк за один запрос)...")
-            phase1_total["n"] = len(all_needed)
-            self.log_queue.put(("__PHASE1_PROGRESS__", 0, len(all_needed)))
+            # Считаем только то, что реально уйдёт переводчику: строки,
+            # уже лежащие в кэше, on_progress не вызывают — если включить
+            # их в общее число, полоса прогресса не дойдёт до конца, а
+            # прогноз времени будет завышен.
+            pending = len(all_needed) - already_cached
+            phase1_total["n"] = pending
+            if pending > 0:
+                self.log_queue.put(("__PHASE1_PROGRESS__", 0, pending))
             translator.warm_batch(all_needed)
             if use_cache:
                 project.save_cache(lang_dir, cache, cache_name)
@@ -1495,6 +1700,31 @@ class App(tk.Tk):
         files_done = {"n": 0}
         total_files = len(files)
 
+        # --- Общее число строк к переводу: нужно для полосы прогресса и
+        # прогноза времени («Времени до завершения»). Считаем заранее по
+        # тем же правилам, по которым потом идёт сам перевод
+        # (core.count_pending), поэтому число совпадает с реальным
+        # количеством обращений к модели. -------------------------------
+        total_lines = 0
+        for path in files:
+            try:
+                total_lines += core.count_pending(project.read_lines(path), overwrite=overwrite)
+            except Exception:
+                pass  # ошибку чтения этого файла честно покажет сам перевод ниже
+        self._log("Строк к переводу: {0}.".format(total_lines))
+
+        lines_lock = threading.Lock()
+        lines_done = {"n": 0}
+        if total_lines > 0:
+            self.log_queue.put(("__PHASE1_PROGRESS__", 0, total_lines))
+
+        def on_line_done():
+            # put() внутри блокировки — чтобы счётчик, приходящий в окно из
+            # разных потоков, никогда не шёл назад (5, 4, 6...).
+            with lines_lock:
+                lines_done["n"] += 1
+                self.log_queue.put(("__PHASE1_PROGRESS__", lines_done["n"], total_lines))
+
         def translate_one_file(path):
             rel = os.path.relpath(path, lang_dir)
             if self._gemma_stop_event.is_set():
@@ -1510,6 +1740,16 @@ class App(tk.Tk):
                 stop_event=self._gemma_stop_event,
             )
 
+            def translate_and_count(prev_source, prev_translation, protected, rules_name):
+                try:
+                    return translator.translate_line(
+                        prev_source, prev_translation, protected, rules_name
+                    )
+                finally:
+                    # Считаем и неудачные строки — для прогноза важно,
+                    # сколько строк уже ОБРАБОТАНО, а не только успешно.
+                    on_line_done()
+
             try:
                 lines = project.read_lines(path)
             except Exception as e:
@@ -1519,7 +1759,7 @@ class App(tk.Tk):
             file_stats = {"translated": 0, "skipped": 0, "failed": 0, "nothing_to_translate": 0}
             try:
                 new_lines = core.process_lines_contextual(
-                    lines, translator.translate_line, resolve_speaker,
+                    lines, translate_and_count, resolve_speaker,
                     overwrite=overwrite, stats=file_stats, log=self._log,
                 )
                 if file_stats["translated"] > 0:
@@ -1532,10 +1772,9 @@ class App(tk.Tk):
                     total_stats[k] += file_stats.get(k, 0)
                 files_done["n"] += 1
                 n = files_done["n"]
-            self.log_queue.put(("__PHASE2_PROGRESS__", n, total_files, rel))
             self._log(
-                "Готово: {0} — переведено: {1}, пропущено: {2}{3}".format(
-                    rel, file_stats["translated"], file_stats["skipped"],
+                "Готово [{0}/{1}]: {2} — переведено: {3}, пропущено: {4}{5}".format(
+                    n, total_files, rel, file_stats["translated"], file_stats["skipped"],
                     ", НЕ УДАЛОСЬ: {0}".format(file_stats["failed"])
                     if file_stats["failed"] else "",
                 )

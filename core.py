@@ -253,6 +253,14 @@ def translate_quoted(quoted, translate_fn):
     translated = translate_fn(protected)
     if translated is None:
         return quoted
+    if "\n" in translated or "\r" in translated:
+        # Переводчик вернул перевод из нескольких физических строк (в
+        # основном встречается у LLM-переводчиков вроде Translate Gemma,
+        # которые иногда путаются и переносят часть ответа на новую
+        # строку). Строка в кавычках .rpy не может занимать больше одной
+        # физической строки файла — если записать такое как есть, файл
+        # перестанет парситься и игра не запустится. Оставляем оригинал.
+        return quoted
     if tokens and not _all_tokens_present(translated, len(tokens)):
         # Переводчик потерял или повредил один из защищённых маркеров
         # (тег, подстановку [name] или %-форматирование). Использовать
@@ -260,6 +268,15 @@ def translate_quoted(quoted, translate_fn):
         # сломанном "%" или подстановке. Оставляем оригинал как есть —
         # это будет обнаружено и переведено заново при следующем запуске
         # (та же логика, что и при сетевой ошибке перевода).
+        return quoted
+    if tokens and markers_collapsed(protected, translated):
+        # Все маркеры на месте (проверка выше это подтвердила), но
+        # какая-то пара тегов, между которыми в оригинале был текст,
+        # оказалась в переводе слипшейся — то есть текст, который они
+        # должны оборачивать, куда-то съехал. Как правило это
+        # проявляется как "{b}{color=...}{/color}{/b}" вместо
+        # "{b}{color=...}текст{/color}{/b}": видимый текст остался
+        # снаружи тегов. Тоже отбрасываем как неудачный перевод.
         return quoted
     # На всякий случай экранируем случайно попавшие в перевод кавычки
     # (сами экранированные последовательности сейчас скрыты под
@@ -272,6 +289,37 @@ def translate_quoted(quoted, translate_fn):
 def _all_tokens_present(text, count):
     found = {int(m.group(1)) for m in _RE_TOKEN.finditer(text)}
     return all(i in found for i in range(count))
+
+
+def _adjacent_marker_pairs(text):
+    """Возвращает множество пар (idx1, idx2) — номеров маркеров, которые
+    в text идут вплотную друг за другом без единого не-пробельного
+    символа между ними (в порядке появления). Используется
+    markers_collapsed() для сравнения взаимного расположения маркеров до
+    и после перевода."""
+    pairs = set()
+    prev_idx = None
+    prev_end = None
+    for m in _RE_TOKEN.finditer(text):
+        idx = int(m.group(1))
+        if prev_idx is not None and text[prev_end:m.start()].strip() == "":
+            pairs.add((prev_idx, idx))
+        prev_idx = idx
+        prev_end = m.end()
+    return pairs
+
+
+def markers_collapsed(source_protected, translated):
+    """True, если в translated образовалась "слипшаяся" пара маркеров
+    (без текста между ними), которой не было в source_protected — то
+    есть переводчик оторвал теги от текста, который они должны
+    оборачивать. Типичный сбой у LLM-переводчиков (например Translate
+    Gemma): все маркеры формально на месте (tokens_preserved() говорит
+    "ок"), но фраза внутри {b}...{/b}/{color=...}...{/color} и т.п.
+    съехала наружу, а сами теги слиплись друг с другом в конце строки.
+    Дополняет _all_tokens_present() — та проверяет только сам факт
+    присутствия маркеров, эта — их взаимное расположение."""
+    return bool(_adjacent_marker_pairs(translated) - _adjacent_marker_pairs(source_protected))
 
 
 def _has_translatable_content(protected):
@@ -395,6 +443,21 @@ def extract_protected_text(quoted):
         return None
     protected, _ = protect(quoted[1:-1])
     return protected
+
+
+def count_pending(lines, overwrite=False):
+    """Сколько строк в этом файле реально предстоит отправить на
+    перевод (не переведены и в них есть что переводить). Нужен
+    контекстному движку (Translate Gemma), у которого нет общего
+    предварительного сбора уникальных текстов, — чтобы заранее знать
+    общее число строк для индикатора прогресса и оценки времени. Те же
+    правила, что и в process_lines_contextual(), поэтому число
+    совпадает с тем, сколько раз позже будет вызван переводчик."""
+    count = 0
+    for entry in find_translatable(lines):
+        if _is_untranslated(entry, overwrite) and needs_translation(entry['orig_quoted']):
+            count += 1
+    return count
 
 
 def collect_needed_texts(lines, overwrite=False):

@@ -21,9 +21,10 @@ translate_line() на каждую строку по очереди.
 """
 
 import json
-import time
 import urllib.error
 import urllib.request
+
+import core  # переиспользуем текущий формат маркеров защиты (core.set_marker())
 
 DEFAULT_URL = "http://127.0.0.1:8080"
 DEFAULT_NGL = 99
@@ -55,15 +56,99 @@ Do not explain translation decisions.
 Do not add information that is absent from the source.
 Return only the final Russian translation.
 
-IMPORTANT: If the [CURRENT_SOURCE] contains text markers {*} or [*] or @@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence."""
+IMPORTANT: If the [CURRENT_SOURCE] contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence."""
+
+# Отдельный промпт для строк БЕЗ контекста (блоки old/new — пункты меню,
+# текст интерфейса, подписи и т.п.): основной SYSTEM_PROMPT написан в
+# терминах диалога ("game dialogue", "[PREVIOUS_SOURCE]/[PREVIOUS_TRANSLATION]
+# are context only", "use the previous translation to maintain consistent
+# terminology") — а для old/new-строк эти поля в запросе всегда пустые
+# (см. core.process_lines_contextual(): контекст ведётся только между
+# диалоговыми репликами). Промпт, который постоянно ссылается на то, чего
+# в запросе нет, не улучшает перевод, а на практике совпал с ростом числа
+# повреждённых тегов и утечек промпта в ответе — отдельный, честный промпт
+# без упоминания контекста исключает этот источник путаницы у модели.
+SYSTEM_PROMPT_NO_CONTEXT = """TASK: Translate English game text into natural Russian.
+
+STYLE: natural conversational Russian suitable for a story-driven video game.
+
+Preserve:
+- meaning and intent;
+- tone and emotional nuance;
+- slang, profanity and informal speech;
+- hesitation, repetition and incomplete sentences;
+- names, terminology and important formatting.
+
+If a literal translation sounds unnatural in Russian, rewrite it naturally while preserving the original meaning.
+
+If the current line contains a joke, idiom, pun or wordplay, preserve its function and humor. If a literal translation would destroy the joke, recreate an equivalent natural Russian wordplay where reasonably possible.
+
+Do not explain translation decisions.
+Do not add information that is absent from the source.
+Return only the final Russian translation.
+
+IMPORTANT: If the text line for translating contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence."""
 
 
 class GemmaError(Exception):
     """Сетевая или протокольная ошибка при обращении к серверу."""
 
 
-def build_messages(previous_source, previous_translation, current_source, rules_name=None):
-    system = SYSTEM_PROMPT
+# Иногда (небольшая локальная модель, не идеальная) Translate Gemma вместо
+# чистого перевода повторяет кусок собственного промпта — например,
+# буквально вставляет "[CURRENT_SOURCE]" в ответ вместо того, чтобы
+# перевести только то, что после этой метки. core.translate_quoted() и так
+# отбросит такой ответ (там есть отдельная проверка на перенос строки), но
+# здесь проверяем раньше и явно, чтобы можно было ПОВТОРИТЬ попытку — та же
+# логика, что уже используется для сетевых ошибок и повреждённых маркеров
+# в остальных движках (gtranslate.py и т.д.).
+_PROMPT_LEAK_MARKERS = ("[CURRENT_SOURCE]", "[PREVIOUS_SOURCE]", "[PREVIOUS_TRANSLATION]")
+
+
+def _looks_like_prompt_leak(text):
+    if "\n" in text or "\r" in text:
+        return True
+    return any(marker in text for marker in _PROMPT_LEAK_MARKERS)
+
+
+# Отдельный, более редкий вид порчи — не "слипшиеся" маркеры (это уже
+# ловит core.markers_collapsed(), общая проверка для всех движков), а
+# ПОЛНОСТЬЮ пропавший текст ДО первого маркера или ПОСЛЕ последнего.
+# Пример из практики:
+#   было:  "Grab it from the {b}{color=#7cc7ff}herb shelf{/color}{/b}"
+#   стало: "{b}{color=#7cc7ff}с полки с травами{/color}{/b}"
+# Маркеры здесь стоят друг к другу ровно так же, как в оригинале
+# (markers_collapsed() ничего не найдёт — новых "слипаний" нет), но
+# "Grab it from the" исчезло целиком — модель перевела (или просто
+# повторила) только то, что внутри тегов.
+_MIN_BOUNDARY_CHARS = 3
+
+
+def _boundary_text(text):
+    """(текст до первого маркера защиты, текст после последнего)."""
+    matches = list(core._RE_TOKEN.finditer(text))
+    if not matches:
+        return text, ""
+    return text[:matches[0].start()], text[matches[-1].end():]
+
+
+def _looks_truncated(source_protected, translated):
+    """True, если текст до первого маркера или после последнего в
+    source_protected был содержательным, а в translated соответствующий
+    участок пуст — то есть модель потеряла часть фразы за пределами
+    тегов."""
+    src_lead, src_trail = _boundary_text(source_protected)
+    tr_lead, tr_trail = _boundary_text(translated)
+    if len(src_lead.strip()) >= _MIN_BOUNDARY_CHARS and not tr_lead.strip():
+        return True
+    if len(src_trail.strip()) >= _MIN_BOUNDARY_CHARS and not tr_trail.strip():
+        return True
+    return False
+
+
+def build_messages(previous_source, previous_translation, current_source, rules_name=None,
+                    system_prompt=None):
+    system = system_prompt if system_prompt is not None else SYSTEM_PROMPT
     if rules_name:
         system += "\n\nRULES: Speakers name: {0}".format(rules_name)
 
@@ -81,13 +166,15 @@ def build_messages(previous_source, previous_translation, current_source, rules_
 
 
 def raw_translate(base_url, previous_source, previous_translation, current_source,
-                   rules_name=None, max_tokens=DEFAULT_N_PREDICT, timeout=60):
+                   rules_name=None, system_prompt=None, max_tokens=DEFAULT_N_PREDICT, timeout=60):
     """Один запрос к /v1/chat/completions. Возвращает переведённый текст
     (обрезанный по краям пробелов). Бросает GemmaError при сетевой или
     протокольной ошибке."""
     url = base_url.rstrip("/") + "/v1/chat/completions"
     payload = {
-        "messages": build_messages(previous_source, previous_translation, current_source, rules_name),
+        "messages": build_messages(
+            previous_source, previous_translation, current_source, rules_name, system_prompt,
+        ),
         "temperature": 0,
         "max_tokens": max_tokens,
     }
@@ -126,10 +213,7 @@ class GemmaTranslator:
     .stats — при параллельном переводе нескольких файлов создавайте свой
     экземпляр на каждый рабочий поток."""
 
-    RETRY_COOLDOWN = 2.0
-    MAX_COOLDOWN = 15.0
-
-    def __init__(self, base_url, max_tokens=DEFAULT_N_PREDICT, retries=3,
+    def __init__(self, base_url, max_tokens=DEFAULT_N_PREDICT, retries=2,
                  log=None, on_progress=None, stop_event=None):
         self.base_url = (base_url or DEFAULT_URL).strip()
         self.max_tokens = max_tokens
@@ -153,18 +237,53 @@ class GemmaTranslator:
 
     def translate_line(self, previous_source, previous_translation, current_source, rules_name=None):
         """Возвращает перевод current_source (уже защищённого маркерами
-        текста) или None при неудаче (после исчерпания попыток)."""
+        текста) или None при неудаче (после исчерпания попыток).
+
+        rules_name=None — сигнал из core.process_lines_contextual(), что
+        это строка БЕЗ контекста (блок old/new: пункты меню, текст
+        интерфейса и т.п. — для диалоговых реплик rules_name всегда
+        задан, минимум "Narrator", см. character_names.resolve_speaker_name()).
+        Для таких строк используется отдельный промпт
+        (SYSTEM_PROMPT_NO_CONTEXT), не упоминающий [PREVIOUS_SOURCE]/
+        [PREVIOUS_TRANSLATION] — в запросе их всё равно не будет, а
+        промпт, ссылающийся на отсутствующие поля, на практике чаще
+        путает модель, чем помогает.
+
+        Без задержек между попытками: в отличие от облачных API (Google/
+        DeepL/LibreTranslate), откуда этот класс унаследовал саму
+        структуру retry-цикла, здесь сервер локальный — ждать несколько
+        секунд "чтобы не перегрузить сервис" бессмысленно, это просто
+        простой впустую. По умолчанию всего 2 попытки (одна исходная и
+        один повтор) — по опыту, если битый ответ не исправился со
+        второго раза, с теми же настройками он не исправится и дальше."""
+        system_prompt = SYSTEM_PROMPT if rules_name is not None else SYSTEM_PROMPT_NO_CONTEXT
         if self._is_stopped():
             return None
-        cooldown = self.RETRY_COOLDOWN
         for attempt in range(1, self.retries + 1):
             if self._is_stopped():
                 return None
             try:
                 result = raw_translate(
                     self.base_url, previous_source, previous_translation,
-                    current_source, rules_name=rules_name, max_tokens=self.max_tokens,
+                    current_source, rules_name=rules_name, system_prompt=system_prompt,
+                    max_tokens=self.max_tokens,
                 )
+                if _looks_like_prompt_leak(result):
+                    self.log(
+                        "Translate Gemma вернула повреждённый ответ (перенос "
+                        "строки или обрывок промпта вроде \"[CURRENT_SOURCE]\" "
+                        "в тексте) — повторяю (попытка {0}/{1})..."
+                        .format(attempt, self.retries)
+                    )
+                    continue
+                if _looks_truncated(current_source, result):
+                    self.log(
+                        "Translate Gemma потеряла часть текста за пределами "
+                        "тегов (в ответе осталось только то, что внутри "
+                        "{{...}}) — повторяю (попытка {0}/{1})..."
+                        .format(attempt, self.retries)
+                    )
+                    continue
                 self.stats["requests"] += 1
                 self.on_progress()
                 return result
@@ -173,8 +292,6 @@ class GemmaTranslator:
                     "Ошибка Translate Gemma (попытка {0}/{1}): {2}."
                     .format(attempt, self.retries, e)
                 )
-                time.sleep(cooldown)
-                cooldown = min(self.MAX_COOLDOWN, cooldown * 1.6)
         self.stats["errors"] += 1
         self.log("Не удалось перевести строку через Translate Gemma, оставляю оригинал.")
         return None

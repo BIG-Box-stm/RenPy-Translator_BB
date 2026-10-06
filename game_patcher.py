@@ -32,6 +32,14 @@ import shutil
 # языков и т.п.) не трогается и не мешает поиску.
 _RE_REGULAR_FONT = re.compile(r'-Regular\.(ttf|otf)$', re.IGNORECASE)
 _RE_BOLD_FONT = re.compile(r'-Bold\.(ttf|otf)$', re.IGNORECASE)
+# "Light" — третий, НЕОБЯЗАТЕЛЬНЫЙ шрифт из того же комплекта. Нужен не
+# для общего текста игры (для этого хватает Regular/Bold), а для замены
+# ИНДИВИДУАЛЬНЫХ шрифтов конкретных персонажей (who_font=... в
+# Character(...)) — такие шрифты часто декоративные/стилизованные и почти
+# никогда не поддерживают кириллицу, значит, при переводе имени персонажа
+# на русский текст в его собственном шрифте превратится в кракозябры,
+# если не подменить и этот шрифт тоже. См. character_names.py.
+_RE_LIGHT_FONT = re.compile(r'-Light\.(ttf|otf)$', re.IGNORECASE)
 
 
 class FontsNotFoundError(Exception):
@@ -65,6 +73,32 @@ def _find_one_font(bundle_dir, pattern, suffix_label):
     return matches[0]
 
 
+def find_light_font(bundle_dir):
+    """Ищет необязательный запасной шрифт с суффиксом "-Light" (та же
+    логика, что у _find_one_font, но без исключения при полном
+    отсутствии файла — не у каждой игры есть персонажи со своим
+    who_font, так что этот шрифт может быть не нужен вовсе). Бросает
+    FontsNotFoundError только при НЕОДНОЗНАЧНОСТИ (несколько
+    кандидатов) — как и для Regular/Bold, программа не угадывает,
+    какой из них нужен. Возвращает относительный путь (с "/") или None,
+    если такого файла в bundle_dir просто нет."""
+    matches = []
+    for root, _dirs, files in os.walk(bundle_dir):
+        for name in files:
+            if _RE_LIGHT_FONT.search(name):
+                rel = os.path.relpath(os.path.join(root, name), bundle_dir)
+                matches.append(rel.replace(os.sep, "/"))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise FontsNotFoundError(
+            "В папке {0} найдено сразу несколько файлов с суффиксом "
+            "\"-Light\": {1}. Оставьте там только один такой файл."
+            .format(bundle_dir, ", ".join(matches))
+        )
+    return matches[0]
+
+
 def find_font_files(bundle_dir):
     """Ищет в bundle_dir пару файлов шрифта по суффиксам "-Regular" и
     "-Bold" (расширение .ttf или .otf, регистр не важен). Возвращает
@@ -88,10 +122,10 @@ LANGUAGE_NAMES = {
 
 # Результаты правки текста файла.
 DONE = "done"                  # текст изменён, его нужно записать
+DONE_APPENDED = "done_appended"  # текст изменён: наш язык добавлен в уже существующий список
 ALREADY = "already"            # нужное уже есть — ничего не менять
 NO_SCREEN = "no_screen"        # в файле нет screen preferences()
-NO_ANCHOR = "no_anchor"        # в этом экране нет блока "Rollback Side"
-BAD_STRUCTURE = "bad_structure"  # блок "Rollback Side" стоит не в vbox
+NO_ANCHOR = "no_anchor"        # в этом экране нет вообще ни одного vbox:
 
 
 def detect_newline(text):
@@ -174,15 +208,62 @@ def find_existing_language_button(text, lang, name):
     return None
 
 
+_RE_VBOX_HEADER = re.compile(r'^[ \t]*vbox\s*:\s*(#.*)?$')
+# Название блока языка в разных играх пишут то с обёрткой _(...) для
+# перевода, то без неё ("Language" — служебное слово интерфейса, не
+# реплика, так что оба варианта встречаются).
+_RE_LANGUAGE_LABEL = re.compile(r'''label\s+_?\(?\s*(["'])Language\1\)?''')
+_RE_LANGUAGE_ACTION = re.compile(r'Language\s*\(')
+_RE_EXISTING_TEXTBUTTON_WRAPPED = re.compile(r'''textbutton\s+_\(\s*["']''')
+
+
+def _vbox_span(lines, header_idx, end):
+    """Для vbox:, начинающегося в header_idx, возвращает
+    (last_content_idx, child_indent) — индекс последней содержательной
+    строки его тела (туда же вставляется новая строка, если понадобится)
+    и отступ, которым пользуются его дочерние строки (сам отступ как
+    литеральная строка пробелов/табов — какой встретился в файле, такой
+    и повторяем; None, если тело пустое)."""
+    header_len = _indent_len(lines[header_idx])
+    last_content = header_idx
+    child_indent = None
+    for k in range(header_idx + 1, end):
+        line = lines[k]
+        if not line.strip():
+            continue
+        if _indent_len(line) <= header_len:
+            break
+        if child_indent is None:
+            child_indent = _leading_ws(line)
+        last_content = k
+    return last_content, child_indent
+
+
 def patch_screens_text(text, lang, name):
-    """Вставляет блок выбора языка в screen preferences() сразу после
-    vbox, в котором стоит label _("Rollback Side"). Возвращает
-    (статус, новый_текст_или_описание):
-      DONE          — вставлено, второй элемент — новый текст;
+    """Вставляет выбор языка в screen preferences(). Порядок попыток:
+
+    1. Ищет уже существующий vbox с выбором языка — по строке
+       label "Language"/_("Language") или по любому действию
+       Language(...) внутри него — и добавляет туда ОДНУ строку с нашим
+       языком, подстраиваясь под уже используемый в этом файле стиль
+       (тот же отступ — теми же символами, что у соседних строк; та же
+       обёртка _(...) вокруг подписи кнопки, если ею пользуются другие
+       кнопки в этом же блоке, и без нее, если нет).
+    2. Если такого блока нет вообще — вставляет свой собственный полный
+       блок (см. language_selector_lines) сразу после ПОСЛЕДНЕГО vbox:
+       в этом экране, какой бы он ни был. Раньше вместо этого требовался
+       конкретно блок с label "Rollback Side" — это было привязкой к
+       структуре одной конкретной игры, которая есть далеко не у каждой.
+
+    Возвращает (статус, новый_текст_или_описание):
+      DONE_APPENDED — наш язык добавлен в уже существующий список языков;
+      DONE          — вставлен новый блок выбора языка целиком;
       ALREADY       — выбор этого языка уже есть, второй элемент — что
                       именно найдено (строка для журнала);
-      NO_SCREEN / NO_ANCHOR / BAD_STRUCTURE — вставить не удалось,
-                      файл менять не нужно."""
+      NO_SCREEN     — в файле нет screen preferences(), файл не менялся;
+      NO_ANCHOR     — в этом экране вообще нет ни одного vbox:, не знаем,
+                      куда вставлять, файл не менялся.
+    """
     found = find_existing_language_button(text, lang, name)
     if found:
         return ALREADY, found
@@ -207,50 +288,44 @@ def patch_screens_text(text, lang, name):
             end = i
             break
 
-    label_re = re.compile(r'''label\s+_\(\s*(["'])Rollback Side\1\s*\)''')
-    label_idx = None
-    for i in range(start, end):
-        if label_re.search(lines[i]):
-            label_idx = i
-            break
-    if label_idx is None:
+    vbox_headers = [i for i in range(start, end) if _RE_VBOX_HEADER.match(lines[i])]
+    if not vbox_headers:
         return NO_ANCHOR, text
 
-    label_indent = _leading_ws(lines[label_idx])
-
-    # Ближайшая выше строка с меньшим отступом — заголовок блока, в
-    # котором стоит label. Обычно это "vbox:".
-    header_idx = None
-    for j in range(label_idx - 1, start, -1):
-        line = lines[j]
-        if not line.strip() or line.lstrip().startswith("#"):
+    # --- Попытка №1: свой список языков у игры уже есть — дописываем
+    # туда, а не заводим второй, дублирующий блок. -----------------------
+    for header_idx in vbox_headers:
+        last_content, child_indent = _vbox_span(lines, header_idx, end)
+        body = "".join(lines[header_idx + 1:last_content + 1])
+        if not (_RE_LANGUAGE_LABEL.search(body) or _RE_LANGUAGE_ACTION.search(body)):
             continue
-        if _indent_len(line) < _indent_len(lines[label_idx]):
-            header_idx = j
-            break
-    if header_idx is None or not re.match(r'\s*vbox\b', lines[header_idx]):
-        return BAD_STRUCTURE, text
+        if child_indent is None:
+            child_indent = _leading_ws(lines[header_idx]) + "    "
+        wrapped = bool(_RE_EXISTING_TEXTBUTTON_WRAPPED.search(body))
+        if wrapped:
+            new_line = child_indent + 'textbutton _("{0}") action Language("{1}")'.format(name, lang)
+        else:
+            new_line = child_indent + 'textbutton "{0}" action Language("{1}")'.format(name, lang)
+        if not lines[last_content].endswith(("\n", "\r")):
+            lines[last_content] += nl
+        lines[last_content + 1:last_content + 1] = [new_line + nl]
+        return DONE_APPENDED, "".join(lines)
 
+    # --- Попытка №2: своего блока с языком нет — вставляем целиком новый,
+    # сразу после последнего vbox: в этом экране (было: обязательно после
+    # блока с "Rollback Side", что есть не у каждой игры). ----------------
+    header_idx = vbox_headers[-1]
+    last_content, child_indent = _vbox_span(lines, header_idx, end)
     header_indent = _leading_ws(lines[header_idx])
-    header_len = len(header_indent)
-
-    # Конец vbox: последняя непустая строка перед первой строкой с
-    # отступом не глубже заголовка.
-    last_content = label_idx
-    for k in range(label_idx + 1, end):
-        line = lines[k]
-        if not line.strip():
-            continue
-        if _indent_len(line) <= header_len:
-            break
-        last_content = k
+    if child_indent is None:
+        child_indent = header_indent + "    "
 
     if not lines[last_content].endswith(("\n", "\r")):
         lines[last_content] += nl
 
     new_block = [nl]  # пустая строка перед новым блоком
     new_block += [
-        l + nl for l in language_selector_lines(lang, name, header_indent, label_indent)
+        l + nl for l in language_selector_lines(lang, name, header_indent, child_indent)
     ]
     lines[last_content + 1:last_content + 1] = new_block
     return DONE, "".join(lines)
@@ -300,6 +375,39 @@ def missing_fonts(game_dir, regular_font, bold_font):
     return result
 
 
+class PatchTargetError(Exception):
+    """Не удалось однозначно найти файл, который нужно поправить (gui.rpy
+    или screens.rpy) — либо его нет нигде в game/, либо найдено больше
+    одного кандидата с таким именем в разных подпапках."""
+
+
+def find_game_file(game_dir, filename):
+    """Ищет файл с именем filename (без учёта регистра) где угодно
+    внутри game_dir, кроме game/tl (там переводы, не исходники игры).
+    Многие игры кладут gui.rpy/screens.rpy не в корень game/, а в свою
+    произвольную подпапку (например game/scripts/GUI/) — поэтому вместо
+    жёсткого os.path.join(game_dir, filename) ищем по всему дереву.
+    Возвращает полный путь, либо None, если файла нигде нет. Бросает
+    PatchTargetError, если найдено больше одного совпадения — программа
+    не гадает, какой из них настоящий."""
+    matches = []
+    target = filename.lower()
+    for root, dirs, files in os.walk(game_dir):
+        dirs[:] = [d for d in dirs if d.lower() != "tl"]
+        for name in files:
+            if name.lower() == target:
+                matches.append(os.path.join(root, name))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise PatchTargetError(
+            "Найдено больше одного файла {0}: {1}. Программа не может "
+            "сама угадать, какой из них настоящий — уберите лишний или "
+            "разберитесь вручную.".format(filename, ", ".join(matches))
+        )
+    return matches[0]
+
+
 def apply_all(bundle_dir, game_dir, lang, log=None):
     """Выполняет все три шага. Пишет ход работы в log(msg). Возвращает
     словарь со статусом каждого шага: 'fonts', 'gui', 'screens' — одно
@@ -338,13 +446,19 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
 
     # --- 2. gui.rpy ------------------------------------------------------
     log("2/3. Подключаю шрифты в gui.rpy (язык: {0})...".format(lang))
-    gui_path = os.path.join(game_dir, "gui.rpy")
-    if not os.path.isfile(gui_path):
+    try:
+        gui_path = find_game_file(game_dir, "gui.rpy")
+    except PatchTargetError as e:
+        log("  ОШИБКА: {0}".format(e))
+        gui_path = None
+        result["gui"] = "error"
+    if gui_path is None and result.get("gui") != "error":
         log(
-            "  gui.rpy не найден в папке игры — шаг пропущен. Если у игры "
-            "остался только gui.rpyc, сначала нажмите «Подготовить игру»."
+            "  gui.rpy не найден нигде в папке game — шаг пропущен. Если у "
+            "игры остался только gui.rpyc, сначала нажмите «Подготовить "
+            "игру»."
         )
-    else:
+    elif gui_path is not None:
         try:
             status, new_text = patch_gui_text(read_text(gui_path), lang, regular_font, bold_font)
             if status == ALREADY:
@@ -363,21 +477,33 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
 
     # --- 3. screens.rpy ----------------------------------------------------
     log("3/3. Добавляю выбор языка в настройки (screens.rpy)...")
-    screens_path = os.path.join(game_dir, "screens.rpy")
-    if not os.path.isfile(screens_path):
+    try:
+        screens_path = find_game_file(game_dir, "screens.rpy")
+    except PatchTargetError as e:
+        log("  ОШИБКА: {0}".format(e))
+        screens_path = None
+        result["screens"] = "error"
+    if screens_path is None and result.get("screens") != "error":
         log(
-            "  screens.rpy не найден в папке игры — шаг пропущен. Если у "
-            "игры остался только screens.rpyc, сначала нажмите "
+            "  screens.rpy не найден нигде в папке game — шаг пропущен. "
+            "Если у игры остался только screens.rpyc, сначала нажмите "
             "«Подготовить игру»."
         )
-    else:
+    elif screens_path is not None:
         try:
             status, payload = patch_screens_text(read_text(screens_path), lang, name)
-            if status == DONE:
+            if status == DONE_APPENDED:
                 write_text(screens_path, payload)
                 log(
-                    "  В screen preferences() после блока «Rollback Side» "
-                    "добавлен выбор языка (кнопка «{0}»).".format(name)
+                    "  В screen preferences() уже был свой список языков — "
+                    "в него добавлена кнопка «{0}».".format(name)
+                )
+                result["screens"] = "done"
+            elif status == DONE:
+                write_text(screens_path, payload)
+                log(
+                    "  В screen preferences() добавлен новый блок выбора "
+                    "языка (кнопка «{0}»).".format(name)
                 )
                 result["screens"] = "done"
             elif status == ALREADY:
@@ -392,18 +518,11 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
                     "пропущен, файл не менялся. Добавьте блок выбора языка "
                     "в меню настроек вручную."
                 )
-            elif status == NO_ANCHOR:
+            else:  # NO_ANCHOR
                 log(
-                    "  В screen preferences() нет блока label "
-                    "_(\"Rollback Side\") — не знаю, куда вставлять, шаг "
-                    "пропущен, файл не менялся. Добавьте блок выбора "
-                    "языка вручную."
-                )
-            else:
-                log(
-                    "  Блок «Rollback Side» стоит не внутри vbox — "
-                    "структура экрана нестандартная, шаг пропущен, файл "
-                    "не менялся. Добавьте блок выбора языка вручную."
+                    "  В screen preferences() нет вообще ни одного vbox: — "
+                    "не знаю, куда вставлять, шаг пропущен, файл не "
+                    "менялся. Добавьте блок выбора языка вручную."
                 )
         except Exception as e:
             log("  ОШИБКА при правке screens.rpy: {0}".format(e))
