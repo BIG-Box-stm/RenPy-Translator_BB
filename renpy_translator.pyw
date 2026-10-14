@@ -27,6 +27,7 @@ DeepL или локальный LibreTranslate.
 """
 
 import concurrent.futures
+import hashlib
 import os
 import queue
 import threading
@@ -39,11 +40,13 @@ import core
 import deepl_translate
 import eta
 import game_patcher
+import gemma4_translate
 import gemma_launcher
 import gtranslate
 import libretranslate_launcher
 import libretranslate_translate
 import project
+import prompts
 import renpy_sdk
 import rpa_tools
 import rpy_autofix
@@ -84,6 +87,7 @@ RENPY_LANG_CODES = ["ru", "fr", "es", "zh", "en"]
 # набранный вручную — единственное требование к нему описано в
 # core.parse_marker_template().
 MARKER_PRESETS = [
+    core.NO_MARKER_LABEL,   # без маркеров: в переводчик уходит исходная строка с тегами
     "@@{N}@@",
     "Zqtx{N}xtqZ",
     "[ZXQPROTECTEDTOKEN{N}QXZ]",
@@ -156,7 +160,7 @@ class App(tk.Tk):
         self.deepl_key_var = tk.StringVar()
         self.libre_url_var = tk.StringVar(value=libretranslate_translate.DEFAULT_URL)
         self.libre_key_var = tk.StringVar()
-        self.marker_var = tk.StringVar(value=core.DEFAULT_MARKER_TEMPLATE)
+        self.marker_var = tk.StringVar(value=core.NO_MARKER_LABEL)
         self.renpy_lang_var = tk.StringVar(value="ru")
 
         # --- Translate Gemma (см. group_gemma в _build_ui) -------------
@@ -168,6 +172,18 @@ class App(tk.Tk):
         self.gemma_ntokens_var = tk.StringVar()
         self.gemma_url_var = tk.StringVar(value=translate_gemma.DEFAULT_URL)
         self._gemma_stop_event = None
+
+        # --- Gemma 4 (обычная LLM, одна строка за запрос, без контекста).
+        # Папка llama.cpp общая с Translate Gemma (gemma_llama_folder_var),
+        # остальное — свои отдельные поля и свои значения по умолчанию.
+        self.gemma4_model_path_var = tk.StringVar(value=self.settings.get("gemma4_model_path", ""))
+        self.gemma4_ngl_var = tk.StringVar()
+        self.gemma4_np_var = tk.StringVar()
+        self.gemma4_ctx_var = tk.StringVar()
+        self.gemma4_ntokens_var = tk.StringVar()
+        self.gemma4_url_var = tk.StringVar(value=gemma4_translate.DEFAULT_URL)
+        # Выбор промпта для нейросетевых движков (см. prompts.py).
+        self.prompt_var = tk.StringVar(value=prompts.DEFAULT_LABEL)
 
         self.log_queue = queue.Queue()
         self.worker_thread = None
@@ -235,6 +251,7 @@ class App(tk.Tk):
                 "DeepL (нужен ключ API)",
                 "LibreTranslate (офлайн, локально)",
                 "Translate Gemma (офлайн)",
+                "Gemma 4 (офлайн)",
             ],
         )
         self.engine_combo.grid(row=1, column=0, sticky="w", pady=(2, 0))
@@ -280,77 +297,39 @@ class App(tk.Tk):
         )
         self.launch_gemma_btn.grid(row=1, column=3, sticky="w", padx=(16, 0), pady=(2, 0))
 
+        self.gemma4_url_label = ttk.Label(frame_engine, text="Адрес Gemma 4:")
+        self.gemma4_url_label.grid(row=0, column=2, sticky="w", padx=(20, 0))
+        self.gemma4_url_entry = ttk.Entry(frame_engine, textvariable=self.gemma4_url_var, width=22)
+        self.gemma4_url_entry.grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(2, 0))
+
+        self.gemma4_launch_label = ttk.Label(frame_engine, text="Только для Gemma 4:")
+        self.gemma4_launch_label.grid(row=0, column=3, sticky="w", padx=(16, 0))
+        self.launch_gemma4_btn = ttk.Button(
+            frame_engine, text="Запустить Gemma 4",
+            command=self._start_launch_gemma4,
+        )
+        self.launch_gemma4_btn.grid(row=1, column=3, sticky="w", padx=(16, 0), pady=(2, 0))
+
         # --- Настройка Translate Gemma (отдельный блок, показывается
         # только для этого движка — см. _on_engine_changed) -------------
-        self.group_gemma = ttk.LabelFrame(self, text="Настройка Translate Gemma")
-        self.group_gemma.columnconfigure(0, weight=1)
-
-        ttk.Label(self.group_gemma, text="Папка llama.cpp:").grid(
-            row=0, column=0, sticky="w", padx=8, pady=(6, 0)
-        )
-        ttk.Label(self.group_gemma, text="Загрузка GPU").grid(
-            row=0, column=1, sticky="w", padx=(16, 0), pady=(6, 0)
-        )
-        ttk.Label(self.group_gemma, text="Число потоков").grid(
-            row=0, column=2, sticky="w", padx=(16, 0), pady=(6, 0)
-        )
-
-        row_gemma_folder = ttk.Frame(self.group_gemma)
-        row_gemma_folder.grid(row=1, column=0, sticky="we", padx=8, pady=(2, 0))
-        ttk.Entry(row_gemma_folder, textvariable=self.gemma_llama_folder_var).pack(
-            side="left", fill="x", expand=True
-        )
-        ttk.Button(
-            row_gemma_folder, text="Обзор...", command=self._choose_gemma_llama_folder,
-        ).pack(side="left", padx=(6, 0))
-
-        row_ngl = ttk.Frame(self.group_gemma)
-        row_ngl.grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(2, 0))
-        ttk.Entry(row_ngl, textvariable=self.gemma_ngl_var, width=8).pack(side="left")
-        ttk.Label(row_ngl, text="-ngl").pack(side="left", padx=(4, 0))
-
-        row_np = ttk.Frame(self.group_gemma)
-        row_np.grid(row=1, column=2, sticky="w", padx=(16, 0), pady=(2, 0))
-        ttk.Entry(row_np, textvariable=self.gemma_np_var, width=8).pack(side="left")
-        ttk.Label(row_np, text="-np").pack(side="left", padx=(4, 0))
-
-        ttk.Label(self.group_gemma, text="Модель Translate Gemma .gguf:").grid(
-            row=2, column=0, sticky="w", padx=8, pady=(8, 0)
-        )
-        ttk.Label(self.group_gemma, text="Контекстное окно").grid(
-            row=2, column=1, sticky="w", padx=(16, 0), pady=(8, 0)
-        )
-        ttk.Label(self.group_gemma, text="Токенов в ответе (max)").grid(
-            row=2, column=2, sticky="w", padx=(16, 0), pady=(8, 0)
-        )
-
-        row_gemma_model = ttk.Frame(self.group_gemma)
-        row_gemma_model.grid(row=3, column=0, sticky="we", padx=8, pady=(2, 0))
-        ttk.Entry(row_gemma_model, textvariable=self.gemma_model_path_var).pack(
-            side="left", fill="x", expand=True
-        )
-        ttk.Button(
-            row_gemma_model, text="Обзор...", command=self._choose_gemma_model_file,
-        ).pack(side="left", padx=(6, 0))
-
-        row_ctx = ttk.Frame(self.group_gemma)
-        row_ctx.grid(row=3, column=1, sticky="w", padx=(16, 0), pady=(2, 0))
-        ttk.Entry(row_ctx, textvariable=self.gemma_ctx_var, width=8).pack(side="left")
-        ttk.Label(row_ctx, text="-c").pack(side="left", padx=(4, 0))
-
-        row_n = ttk.Frame(self.group_gemma)
-        row_n.grid(row=3, column=2, sticky="w", padx=(16, 0), pady=(2, 0))
-        ttk.Entry(row_n, textvariable=self.gemma_ntokens_var, width=8).pack(side="left")
-        ttk.Label(row_n, text="-n").pack(side="left", padx=(4, 0))
-
-
-        ttk.Label(
-            self.group_gemma,
-            text="По умолчанию:  -ngl {0}  /  -np {1}  /  -c {2}  /  -n {3}  "
-                 "(оставьте поля пустыми, чтобы использовать эти значения)"
+        self.group_gemma = self._make_llama_group(
+            "Настройка Translate Gemma", "Модель Translate Gemma .gguf:",
+            self.gemma_model_path_var, self._choose_gemma_model_file,
+            self.gemma_ngl_var, self.gemma_np_var, self.gemma_ctx_var, self.gemma_ntokens_var,
+            "По умолчанию:  -ngl {0}  /  -np {1}  /  -c {2}  /  -n {3}  "
+            "(оставьте поля пустыми, чтобы использовать эти значения)"
             .format(translate_gemma.DEFAULT_NGL, translate_gemma.DEFAULT_NP,
                     translate_gemma.DEFAULT_CTX, translate_gemma.DEFAULT_N_PREDICT),
-        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 8))
+        )
+        self.group_gemma4 = self._make_llama_group(
+            "Настройка Gemma 4", "Модель Gemma 4 .gguf:",
+            self.gemma4_model_path_var, self._choose_gemma4_model_file,
+            self.gemma4_ngl_var, self.gemma4_np_var, self.gemma4_ctx_var, self.gemma4_ntokens_var,
+            "По умолчанию:  -ngl {0}  /  -np {1}  /  -c {2}  /  -n {3}  +  --jinja --reasoning off  "
+            "(пустые поля = эти значения)"
+            .format(gemma4_translate.DEFAULT_NGL, gemma4_translate.DEFAULT_NP,
+                    gemma4_translate.DEFAULT_CTX, gemma4_translate.DEFAULT_N_PREDICT),
+        )
 
         # --- Две группы: Настройка перевода / Настройки языка -----------
         self.frame_groups = ttk.Frame(self)
@@ -383,6 +362,16 @@ class App(tk.Tk):
         self.batch_delay_var = tk.StringVar(value="")
         self.batch_delay_entry = ttk.Entry(group_translate, textvariable=self.batch_delay_var, width=8)
         self.batch_delay_entry.grid(row=1, column=2, sticky="w", padx=8, pady=(0, 0))
+        # Выбор промпта — на тех же ячейках, что и «Строк в пачке» (у
+        # нейросетевых движков пакетов нет, а у пакетных нет промпта), см.
+        # _on_engine_changed().
+        self.prompt_label = ttk.Label(group_translate, text="Промпт:")
+        self.prompt_label.grid(row=0, column=1, sticky="w", **gt_pad)
+        self.prompt_combo = ttk.Combobox(
+            group_translate, textvariable=self.prompt_var, state="readonly", width=10,
+            values=list(prompts.LABELS),
+        )
+        self.prompt_combo.grid(row=1, column=1, sticky="w", padx=8, pady=(0, 0))
         self.batch_defaults_label = ttk.Label(group_translate, text="", justify="left")
         self.batch_defaults_label.grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 0))
         ttk.Label(
@@ -478,6 +467,64 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Действия пользователя
     # ------------------------------------------------------------------
+    def _make_llama_group(self, title, model_label, model_var, choose_model_cmd,
+                          ngl_var, np_var, ctx_var, n_var, hint):
+        """Блок настроек llama-server (Translate Gemma / Gemma 4). Папка
+        llama.cpp у обоих движков общая (gemma_llama_folder_var)."""
+        group = ttk.LabelFrame(self, text=title)
+        group.columnconfigure(0, weight=1)
+
+        ttk.Label(group, text="Папка llama.cpp:").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(6, 0))
+        ttk.Label(group, text="Загрузка GPU").grid(
+            row=0, column=1, sticky="w", padx=(16, 0), pady=(6, 0))
+        ttk.Label(group, text="Число потоков").grid(
+            row=0, column=2, sticky="w", padx=(16, 0), pady=(6, 0))
+
+        row_folder = ttk.Frame(group)
+        row_folder.grid(row=1, column=0, sticky="we", padx=8, pady=(2, 0))
+        ttk.Entry(row_folder, textvariable=self.gemma_llama_folder_var).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row_folder, text="Обзор...", command=self._choose_gemma_llama_folder).pack(
+            side="left", padx=(6, 0))
+
+        row_ngl = ttk.Frame(group)
+        row_ngl.grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(2, 0))
+        ttk.Entry(row_ngl, textvariable=ngl_var, width=8).pack(side="left")
+        ttk.Label(row_ngl, text="-ngl").pack(side="left", padx=(4, 0))
+
+        row_np = ttk.Frame(group)
+        row_np.grid(row=1, column=2, sticky="w", padx=(16, 0), pady=(2, 0))
+        ttk.Entry(row_np, textvariable=np_var, width=8).pack(side="left")
+        ttk.Label(row_np, text="-np").pack(side="left", padx=(4, 0))
+
+        ttk.Label(group, text=model_label).grid(
+            row=2, column=0, sticky="w", padx=8, pady=(8, 0))
+        ttk.Label(group, text="Контекстное окно").grid(
+            row=2, column=1, sticky="w", padx=(16, 0), pady=(8, 0))
+        ttk.Label(group, text="Токенов в ответе (max)").grid(
+            row=2, column=2, sticky="w", padx=(16, 0), pady=(8, 0))
+
+        row_model = ttk.Frame(group)
+        row_model.grid(row=3, column=0, sticky="we", padx=8, pady=(2, 0))
+        ttk.Entry(row_model, textvariable=model_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(row_model, text="Обзор...", command=choose_model_cmd).pack(
+            side="left", padx=(6, 0))
+
+        row_ctx = ttk.Frame(group)
+        row_ctx.grid(row=3, column=1, sticky="w", padx=(16, 0), pady=(2, 0))
+        ttk.Entry(row_ctx, textvariable=ctx_var, width=8).pack(side="left")
+        ttk.Label(row_ctx, text="-c").pack(side="left", padx=(4, 0))
+
+        row_n = ttk.Frame(group)
+        row_n.grid(row=3, column=2, sticky="w", padx=(16, 0), pady=(2, 0))
+        ttk.Entry(row_n, textvariable=n_var, width=8).pack(side="left")
+        ttk.Label(row_n, text="-n").pack(side="left", padx=(4, 0))
+
+        ttk.Label(group, text=hint).grid(
+            row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 8))
+        return group
+
     def _choose_folder(self):
         path = filedialog.askdirectory(title="Выберите папку игры")
         if not path:
@@ -510,6 +557,16 @@ class App(tk.Tk):
         if path:
             self.gemma_model_path_var.set(path)
             self.settings["gemma_model_path"] = path
+            project.save_settings(self.settings_path, self.settings)
+
+    def _choose_gemma4_model_file(self):
+        path = filedialog.askopenfilename(
+            title="Выберите файл модели Gemma 4",
+            filetypes=[("GGUF модели", "*.gguf"), ("Все файлы", "*.*")],
+        )
+        if path:
+            self.gemma4_model_path_var.set(path)
+            self.settings["gemma4_model_path"] = path
             project.save_settings(self.settings_path, self.settings)
 
     def _int_or_default(self, raw, default, field_label):
@@ -688,6 +745,8 @@ class App(tk.Tk):
             return "libretranslate"
         if engine.startswith("Translate Gemma"):
             return "gemma"
+        if engine.startswith("Gemma 4"):
+            return "gemma4"
         return "google"
 
     def _on_engine_changed(self, _event=None):
@@ -704,20 +763,40 @@ class App(tk.Tk):
                   self.gemma_launch_label, self.launch_gemma_btn):
             w.grid() if show_gemma else w.grid_remove()
 
+        show_gemma4 = key == "gemma4"
+        for w in (self.gemma4_url_label, self.gemma4_url_entry,
+                  self.gemma4_launch_label, self.launch_gemma4_btn):
+            w.grid() if show_gemma4 else w.grid_remove()
+
         if show_gemma:
             self.group_gemma.pack(fill="x", padx=8, pady=6, before=self.frame_groups)
         else:
             self.group_gemma.pack_forget()
+        if show_gemma4:
+            self.group_gemma4.pack(fill="x", padx=8, pady=6, before=self.frame_groups)
+        else:
+            self.group_gemma4.pack_forget()
+
+        # Выбор промпта показывается только для нейросетевых движков. У
+        # Translate Gemma он подменяет промпт для строк меню/интерфейса
+        # (old/new), диалоги идут с контекстным промптом; у Gemma 4 —
+        # промпт для всех строк.
+        show_prompt = show_gemma or show_gemma4
+        for w in (self.prompt_label, self.prompt_combo):
+            w.grid() if show_prompt else w.grid_remove()
+        self.prompt_label.configure(
+            text="Промпт (меню/интерфейс):" if show_gemma else "Промпт:"
+        )
 
         # У Translate Gemma нет пакетного перевода (каждая строка зависит
         # от предыдущей) — поля "Строк в пачке"/"Задержка запросов" ей не
         # нужны и только загромождают интерфейс.
-        show_batch_fields = not show_gemma
+        show_batch_fields = not (show_gemma or show_gemma4)
         for w in (self.batch_items_label, self.batch_items_entry,
                   self.batch_delay_label, self.batch_delay_entry):
             w.grid() if show_batch_fields else w.grid_remove()
 
-        if show_gemma:
+        if show_gemma or show_gemma4:
             self.batch_defaults_label.configure(text="")
         else:
             d = ENGINE_DEFAULTS[key]
@@ -844,6 +923,22 @@ class App(tk.Tk):
         except Exception as e:
             self._log("ОШИБКА при сборе имён персонажей: {0}".format(e))
 
+    def _apply_marker_setting(self):
+        """Читает поле «Разделитель» и включает нужный режим в core:
+        «Без разделителя» либо маркер по шаблону. False — шаблон неверен
+        (ошибка уже показана). Вызывать до старта рабочего потока."""
+        marker_raw = self.marker_var.get().strip() or core.NO_MARKER_LABEL
+        if marker_raw == core.NO_MARKER_LABEL:
+            core.set_no_markers()
+            return True
+        try:
+            marker_open, marker_close = core.parse_marker_template(marker_raw)
+        except ValueError as e:
+            messagebox.showerror("Неверный разделитель", str(e))
+            return False
+        core.set_marker(marker_open, marker_close)
+        return True
+
     def _start(self):
         if not self.tl_dir:
             messagebox.showerror("Ошибка", "Сначала выберите папку игры с папкой game/tl.")
@@ -880,13 +975,10 @@ class App(tk.Tk):
 
         engine = self._current_engine_key()
 
+        if not self._apply_marker_setting():
+            return
+
         if engine == "gemma":
-            marker_raw = self.marker_var.get().strip() or core.DEFAULT_MARKER_TEMPLATE
-            try:
-                marker_open, marker_close = core.parse_marker_template(marker_raw)
-            except ValueError as e:
-                messagebox.showerror("Неверный разделитель", str(e))
-                return
             try:
                 gemma_np = self._int_or_default(
                     self.gemma_np_var.get(), translate_gemma.DEFAULT_NP, "Число потоков"
@@ -900,10 +992,8 @@ class App(tk.Tk):
                 return
             gemma_url = self.gemma_url_var.get().strip() or translate_gemma.DEFAULT_URL
 
-            # Формат маркеров общий для всего модуля core — как и для
-            # остальных движков, меняем его здесь, до запуска фонового
-            # потока.
-            core.set_marker(marker_open, marker_close)
+            ctx_prompt = prompts.load("context", log=self._log)
+            no_ctx_prompt = prompts.load(prompts.key_for_label(self.prompt_var.get()), log=self._log)
 
             self.stop_requested = False
             self.start_btn.configure(state="disabled")
@@ -915,11 +1005,35 @@ class App(tk.Tk):
 
             self.worker_thread = threading.Thread(
                 target=self._worker_gemma,
-                args=(lang_dir, files, overwrite, gemma_url, gemma_np, gemma_n_predict),
+                args=(lang_dir, files, overwrite, gemma_url, gemma_np, gemma_n_predict,
+                      ctx_prompt, no_ctx_prompt),
                 daemon=True,
             )
             self.worker_thread.start()
             return
+
+        gemma4_cfg = None
+        if engine == "gemma4":
+            try:
+                g4_np = self._int_or_default(
+                    self.gemma4_np_var.get(), gemma4_translate.DEFAULT_NP, "Число потоков")
+                g4_n = self._int_or_default(
+                    self.gemma4_ntokens_var.get(), gemma4_translate.DEFAULT_N_PREDICT,
+                    "Токенов в ответе (max)")
+            except ValueError as e:
+                messagebox.showerror("Неверное значение", str(e))
+                return
+            prompt_key = prompts.key_for_label(self.prompt_var.get())
+            prompt_text = prompts.load(prompt_key, log=self._log)
+            gemma4_cfg = {
+                "url": self.gemma4_url_var.get().strip() or gemma4_translate.DEFAULT_URL,
+                "np": max(1, g4_np),
+                "n_predict": g4_n,
+                "prompt": prompt_text,
+                # Свой кэш на каждый промпт (и на каждую правку его текста).
+                "cache_tag": "p{0}_{1}".format(
+                    prompt_key, hashlib.sha1(prompt_text.encode("utf-8")).hexdigest()[:8]),
+            }
 
         deepl_key = self.deepl_key_var.get().strip()
         if engine == "deepl" and not deepl_key:
@@ -934,15 +1048,11 @@ class App(tk.Tk):
         libre_url = self.libre_url_var.get().strip() or libretranslate_translate.DEFAULT_URL
         libre_key = self.libre_key_var.get().strip()
 
-        marker_raw = self.marker_var.get().strip() or core.DEFAULT_MARKER_TEMPLATE
-        try:
-            marker_open, marker_close = core.parse_marker_template(marker_raw)
-        except ValueError as e:
-            messagebox.showerror("Неверный разделитель", str(e))
-            return
-
         batch_items_raw = self.batch_items_var.get().strip()
         batch_delay_raw = self.batch_delay_var.get().strip()
+        if engine == "gemma4":
+            # У Gemma 4 этих полей в интерфейсе нет (скрыты) — не проверяем.
+            batch_items_raw = batch_delay_raw = ""
         batch_items = None
         batch_delay = None
         try:
@@ -971,11 +1081,6 @@ class App(tk.Tk):
             )
             return
 
-        # Формат маркеров общий для всего модуля core — меняем его здесь,
-        # до запуска фонового потока, чтобы вся сессия перевода
-        # использовала один и тот же формат (см. core.set_marker()).
-        core.set_marker(marker_open, marker_close)
-
         self.stop_requested = False
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
@@ -988,7 +1093,8 @@ class App(tk.Tk):
         self.worker_thread = threading.Thread(
             target=self._worker,
             args=(lang_dir, files, src_code, dest_code, overwrite, use_cache,
-                  engine, deepl_key, libre_url, libre_key, batch_items, batch_delay),
+                  engine, deepl_key, libre_url, libre_key, batch_items, batch_delay,
+                  gemma4_cfg),
             daemon=True,
         )
         self.worker_thread.start()
@@ -1410,6 +1516,49 @@ class App(tk.Tk):
             self.log_queue.put(("__ENABLE_WIDGET__", "launch_gemma_btn"))
 
     # ------------------------------------------------------------------
+    # Запуск локального сервера Gemma 4
+    # ------------------------------------------------------------------
+    def _start_launch_gemma4(self):
+        self.launch_gemma4_btn.configure(state="disabled")
+        threading.Thread(target=self._launch_gemma4_worker, daemon=True).start()
+
+    def _launch_gemma4_worker(self):
+        try:
+            folder = self.gemma_llama_folder_var.get().strip()
+            if not folder:
+                raise gemma_launcher.GemmaLauncherError(
+                    "Укажите папку llama.cpp (там, где лежит llama-server.exe)."
+                )
+            model_path = self.gemma4_model_path_var.get().strip()
+            ngl = self._int_or_default(
+                self.gemma4_ngl_var.get(), gemma4_translate.DEFAULT_NGL, "Загрузка GPU")
+            np_ = self._int_or_default(
+                self.gemma4_np_var.get(), gemma4_translate.DEFAULT_NP, "Число потоков")
+            ctx = self._int_or_default(
+                self.gemma4_ctx_var.get(), gemma4_translate.DEFAULT_CTX, "Контекстное окно")
+            n_predict = self._int_or_default(
+                self.gemma4_ntokens_var.get(), gemma4_translate.DEFAULT_N_PREDICT,
+                "Токенов в ответе (max)")
+            base_url = self.gemma4_url_var.get().strip() or gemma4_translate.DEFAULT_URL
+            gemma_launcher.launch(
+                folder, model_path, ngl, np_, ctx, n_predict, base_url, log=self._log,
+                extra_args=gemma4_translate.EXTRA_SERVER_ARGS,
+            )
+            self._log(
+                "Gemma 4 запущена в отдельном окне консоли (с --jinja и "
+                "--reasoning off). Дождитесь в нём сообщения о готовности "
+                "сервера, прежде чем начинать перевод. Translate Gemma и "
+                "Gemma 4 одновременно запускать не нужно — они используют "
+                "один порт по умолчанию."
+            )
+        except (gemma_launcher.GemmaLauncherError, ValueError) as e:
+            self._log("ОШИБКА: {0}".format(e))
+        except Exception as e:
+            self._log("Неожиданная ошибка при запуске Gemma 4: {0}".format(e))
+        finally:
+            self.log_queue.put(("__ENABLE_WIDGET__", "launch_gemma4_btn"))
+
+    # ------------------------------------------------------------------
     # Обновить шрифты, включить язык
     # ------------------------------------------------------------------
     def _start_update_fonts(self):
@@ -1481,16 +1630,19 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     def _worker(self, lang_dir, files, src_code, dest_code, overwrite, use_cache,
                 engine, deepl_key, libre_url, libre_key, batch_items=None,
-                batch_delay=None):
+                batch_delay=None, gemma4_cfg=None):
         cache_names = {
             "google": project.CACHE_FILENAME,
             "deepl": project.CACHE_FILENAME_DEEPL,
             "libretranslate": project.CACHE_FILENAME_LIBRE,
         }
+        if gemma4_cfg:
+            cache_names["gemma4"] = project.CACHE_FILENAME_GEMMA4.format(tag=gemma4_cfg["cache_tag"])
         engine_titles = {
             "google": "Google Translate",
             "deepl": "DeepL",
             "libretranslate": "LibreTranslate",
+            "gemma4": "Gemma 4",
         }
         cache_name = cache_names[engine]
         cache = project.load_cache(lang_dir, cache_name) if use_cache else {}
@@ -1527,6 +1679,12 @@ class App(tk.Tk):
                 log=self._log, on_progress=on_progress,
                 delay=batch_delay, batch_items=batch_items,
             )
+        elif engine == "gemma4":
+            translator = gemma4_translate.Gemma4Translator(
+                base_url=gemma4_cfg["url"], system_prompt=gemma4_cfg["prompt"],
+                np=gemma4_cfg["np"], max_tokens=gemma4_cfg["n_predict"],
+                cache=cache, log=self._log, on_progress=on_progress,
+            )
         else:
             translator = gtranslate.CachedTranslator(
                 src=src_code, dest=dest_code, cache=cache,
@@ -1558,7 +1716,12 @@ class App(tk.Tk):
             .format(len(all_needed), already_cached)
         )
         if all_needed:
-            self._log("Перевожу пачками (несколько строк за один запрос)...")
+            if engine == "gemma4":
+                self._log(
+                    "Перевожу построчно, потоков: {0}...".format(gemma4_cfg["np"])
+                )
+            else:
+                self._log("Перевожу пачками (несколько строк за один запрос)...")
             # Считаем только то, что реально уйдёт переводчику: строки,
             # уже лежащие в кэше, on_progress не вызывают — если включить
             # их в общее число, полоса прогресса не дойдёт до конца, а
@@ -1597,7 +1760,7 @@ class App(tk.Tk):
                 file_stats = {"translated": 0, "skipped": 0, "failed": 0, "nothing_to_translate": 0}
                 new_lines = core.process_lines(
                     lines, translator, overwrite=overwrite, stats=file_stats,
-                    log=self._log,
+                    log=self._log, file_name=rel,
                 )
                 if file_stats["translated"] > 0:
                     project.write_lines(path, new_lines)
@@ -1669,7 +1832,8 @@ class App(tk.Tk):
     # Фоновый поток перевода — Translate Gemma (контекстный, по файлам
     # параллельно, без общего кэша — см. обсуждение в handoff-документе)
     # ------------------------------------------------------------------
-    def _worker_gemma(self, lang_dir, files, overwrite, gemma_url, gemma_np, n_predict):
+    def _worker_gemma(self, lang_dir, files, overwrite, gemma_url, gemma_np, n_predict,
+                      context_prompt=None, no_context_prompt=None):
         self._gemma_stop_event = threading.Event()
 
         # --- Словарь "код персонажа -> настоящее имя" собирается ОДИН
@@ -1738,6 +1902,7 @@ class App(tk.Tk):
             translator = translate_gemma.GemmaTranslator(
                 base_url=gemma_url, max_tokens=n_predict, log=self._log,
                 stop_event=self._gemma_stop_event,
+                context_prompt=context_prompt, no_context_prompt=no_context_prompt,
             )
 
             def translate_and_count(prev_source, prev_translation, protected, rules_name):
@@ -1761,6 +1926,7 @@ class App(tk.Tk):
                 new_lines = core.process_lines_contextual(
                     lines, translate_and_count, resolve_speaker,
                     overwrite=overwrite, stats=file_stats, log=self._log,
+                    file_name=rel,
                 )
                 if file_stats["translated"] > 0:
                     project.write_lines(path, new_lines)

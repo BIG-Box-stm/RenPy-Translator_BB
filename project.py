@@ -10,6 +10,10 @@ import os
 CACHE_FILENAME = "_translator_cache.json"
 CACHE_FILENAME_DEEPL = "_translator_cache_deepl.json"
 CACHE_FILENAME_LIBRE = "_translator_cache_libretranslate.json"
+# Gemma 4: перевод зависит от промпта, поэтому у каждого варианта
+# (номер промпта + хэш его текста) свой кэш — правка файла промпта не
+# подмешивает старые переводы.
+CACHE_FILENAME_GEMMA4 = "_translator_cache_gemma4_{tag}.json"
 
 
 def find_game_dir(project_path):

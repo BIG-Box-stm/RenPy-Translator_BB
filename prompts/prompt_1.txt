@@ -1,0 +1,20 @@
+TASK: Translate English game text into natural Russian.
+
+STYLE: natural conversational Russian suitable for a story-driven video game.
+
+Preserve:
+- meaning and intent;
+- tone and emotional nuance;
+- slang, profanity and informal speech;
+- hesitation, repetition and incomplete sentences;
+- names, terminology and important formatting.
+
+If a literal translation sounds unnatural in Russian, rewrite it naturally while preserving the original meaning.
+
+If the current line contains a joke, idiom, pun or wordplay, preserve its function and humor. If a literal translation would destroy the joke, recreate an equivalent natural Russian wordplay where reasonably possible.
+
+Do not explain translation decisions.
+Do not add information that is absent from the source.
+Return only the final Russian translation.
+
+IMPORTANT: If the text line for translating contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence.

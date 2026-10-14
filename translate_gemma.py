@@ -32,62 +32,13 @@ DEFAULT_NP = 2
 DEFAULT_CTX = 2048
 DEFAULT_N_PREDICT = 256
 
-SYSTEM_PROMPT = """TASK: Translate English game dialogue into natural Russian.
+# Тексты промптов вынесены в папку prompts/ (см. prompts.py). Эти две
+# константы — встроенные запасные варианты; рабочий текст GemmaTranslator
+# получает снаружи (context_prompt / no_context_prompt).
+import prompts
 
-STYLE: natural conversational Russian suitable for a story-driven video game.
-
-Translate only [CURRENT_SOURCE].
-[PREVIOUS_SOURCE] and [PREVIOUS_TRANSLATION] are context only.
-
-Preserve:
-- meaning and intent;
-- tone and emotional nuance;
-- slang, profanity and informal speech;
-- hesitation, repetition and incomplete sentences;
-- names, terminology and important formatting.
-
-Use the previous translation to maintain consistent terminology and phrasing.
-
-If a literal translation sounds unnatural in Russian, rewrite it naturally while preserving the original meaning.
-
-If the current line contains a joke, idiom, pun or wordplay, preserve its function and humor. If a literal translation would destroy the joke, recreate an equivalent natural Russian wordplay where reasonably possible.
-
-Do not explain translation decisions.
-Do not add information that is absent from the source.
-Return only the final Russian translation.
-
-IMPORTANT: If the [CURRENT_SOURCE] contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence."""
-
-# Отдельный промпт для строк БЕЗ контекста (блоки old/new — пункты меню,
-# текст интерфейса, подписи и т.п.): основной SYSTEM_PROMPT написан в
-# терминах диалога ("game dialogue", "[PREVIOUS_SOURCE]/[PREVIOUS_TRANSLATION]
-# are context only", "use the previous translation to maintain consistent
-# terminology") — а для old/new-строк эти поля в запросе всегда пустые
-# (см. core.process_lines_contextual(): контекст ведётся только между
-# диалоговыми репликами). Промпт, который постоянно ссылается на то, чего
-# в запросе нет, не улучшает перевод, а на практике совпал с ростом числа
-# повреждённых тегов и утечек промпта в ответе — отдельный, честный промпт
-# без упоминания контекста исключает этот источник путаницы у модели.
-SYSTEM_PROMPT_NO_CONTEXT = """TASK: Translate English game text into natural Russian.
-
-STYLE: natural conversational Russian suitable for a story-driven video game.
-
-Preserve:
-- meaning and intent;
-- tone and emotional nuance;
-- slang, profanity and informal speech;
-- hesitation, repetition and incomplete sentences;
-- names, terminology and important formatting.
-
-If a literal translation sounds unnatural in Russian, rewrite it naturally while preserving the original meaning.
-
-If the current line contains a joke, idiom, pun or wordplay, preserve its function and humor. If a literal translation would destroy the joke, recreate an equivalent natural Russian wordplay where reasonably possible.
-
-Do not explain translation decisions.
-Do not add information that is absent from the source.
-Return only the final Russian translation.
-
-IMPORTANT: If the text line for translating contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence."""
+SYSTEM_PROMPT = prompts.DEFAULTS["context"]
+SYSTEM_PROMPT_NO_CONTEXT = prompts.DEFAULTS["1"]
 
 
 class GemmaError(Exception):
@@ -111,39 +62,9 @@ def _looks_like_prompt_leak(text):
     return any(marker in text for marker in _PROMPT_LEAK_MARKERS)
 
 
-# Отдельный, более редкий вид порчи — не "слипшиеся" маркеры (это уже
-# ловит core.markers_collapsed(), общая проверка для всех движков), а
-# ПОЛНОСТЬЮ пропавший текст ДО первого маркера или ПОСЛЕ последнего.
-# Пример из практики:
-#   было:  "Grab it from the {b}{color=#7cc7ff}herb shelf{/color}{/b}"
-#   стало: "{b}{color=#7cc7ff}с полки с травами{/color}{/b}"
-# Маркеры здесь стоят друг к другу ровно так же, как в оригинале
-# (markers_collapsed() ничего не найдёт — новых "слипаний" нет), но
-# "Grab it from the" исчезло целиком — модель перевела (или просто
-# повторила) только то, что внутри тегов.
-_MIN_BOUNDARY_CHARS = 3
-
-
-def _boundary_text(text):
-    """(текст до первого маркера защиты, текст после последнего)."""
-    matches = list(core._RE_TOKEN.finditer(text))
-    if not matches:
-        return text, ""
-    return text[:matches[0].start()], text[matches[-1].end():]
-
-
-def _looks_truncated(source_protected, translated):
-    """True, если текст до первого маркера или после последнего в
-    source_protected был содержательным, а в translated соответствующий
-    участок пуст — то есть модель потеряла часть фразы за пределами
-    тегов."""
-    src_lead, src_trail = _boundary_text(source_protected)
-    tr_lead, tr_trail = _boundary_text(translated)
-    if len(src_lead.strip()) >= _MIN_BOUNDARY_CHARS and not tr_lead.strip():
-        return True
-    if len(src_trail.strip()) >= _MIN_BOUNDARY_CHARS and not tr_trail.strip():
-        return True
-    return False
+# Проверка "пропал текст до первого/после последнего тега" общая для
+# Translate Gemma и Gemma 4 и живёт в core.py.
+_looks_truncated = core.looks_truncated
 
 
 def build_messages(previous_source, previous_translation, current_source, rules_name=None,
@@ -214,7 +135,12 @@ class GemmaTranslator:
     экземпляр на каждый рабочий поток."""
 
     def __init__(self, base_url, max_tokens=DEFAULT_N_PREDICT, retries=2,
-                 log=None, on_progress=None, stop_event=None):
+                 log=None, on_progress=None, stop_event=None,
+                 context_prompt=None, no_context_prompt=None):
+        # Тексты системных промптов приходят снаружи (из папки prompts/);
+        # None -> встроенные запасные варианты.
+        self.context_prompt = context_prompt or SYSTEM_PROMPT
+        self.no_context_prompt = no_context_prompt or SYSTEM_PROMPT_NO_CONTEXT
         self.base_url = (base_url or DEFAULT_URL).strip()
         self.max_tokens = max_tokens
         self.retries = retries
@@ -256,7 +182,7 @@ class GemmaTranslator:
         простой впустую. По умолчанию всего 2 попытки (одна исходная и
         один повтор) — по опыту, если битый ответ не исправился со
         второго раза, с теми же настройками он не исправится и дальше."""
-        system_prompt = SYSTEM_PROMPT if rules_name is not None else SYSTEM_PROMPT_NO_CONTEXT
+        system_prompt = self.context_prompt if rules_name is not None else self.no_context_prompt
         if self._is_stopped():
             return None
         for attempt in range(1, self.retries + 1):

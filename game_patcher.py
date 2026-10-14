@@ -244,11 +244,9 @@ def patch_screens_text(text, lang, name):
 
     1. Ищет уже существующий vbox с выбором языка — по строке
        label "Language"/_("Language") или по любому действию
-       Language(...) внутри него — и добавляет туда ОДНУ строку с нашим
-       языком, подстраиваясь под уже используемый в этом файле стиль
-       (тот же отступ — теми же символами, что у соседних строк; та же
-       обёртка _(...) вокруг подписи кнопки, если ею пользуются другие
-       кнопки в этом же блоке, и без нее, если нет).
+       Language(...) внутри него (берётся САМЫЙ ВНУТРЕННИЙ такой vbox) —
+       и добавляет туда ОДНУ строку с нашим языком: тот же отступ, что у
+       соседних строк, подпись кнопки всегда в _(...).
     2. Если такого блока нет вообще — вставляет свой собственный полный
        блок (см. language_selector_lines) сразу после ПОСЛЕДНЕГО vbox:
        в этом экране, какой бы он ни был. Раньше вместо этого требовался
@@ -293,19 +291,23 @@ def patch_screens_text(text, lang, name):
         return NO_ANCHOR, text
 
     # --- Попытка №1: свой список языков у игры уже есть — дописываем
-    # туда, а не заводим второй, дублирующий блок. -----------------------
-    for header_idx in vbox_headers:
+    # туда, а не заводим второй, дублирующий блок. Перебираем vbox с
+    # КОНЦА: внешний vbox (например, весь экран настроек) тоже
+    # "содержит" label Language где-то глубоко внутри, и при переборе
+    # сверху вниз нашёлся бы он, а не вложенный vbox с самим списком
+    # языков — кнопка оказывалась в самом конце экрана. Вложенные блоки
+    # всегда идут в файле ПОЗЖЕ внешних, так что первое совпадение с
+    # конца — самый внутренний подходящий vbox. -------------------------
+    for header_idx in reversed(vbox_headers):
         last_content, child_indent = _vbox_span(lines, header_idx, end)
         body = "".join(lines[header_idx + 1:last_content + 1])
         if not (_RE_LANGUAGE_LABEL.search(body) or _RE_LANGUAGE_ACTION.search(body)):
             continue
         if child_indent is None:
             child_indent = _leading_ws(lines[header_idx]) + "    "
-        wrapped = bool(_RE_EXISTING_TEXTBUTTON_WRAPPED.search(body))
-        if wrapped:
-            new_line = child_indent + 'textbutton _("{0}") action Language("{1}")'.format(name, lang)
-        else:
-            new_line = child_indent + 'textbutton "{0}" action Language("{1}")'.format(name, lang)
+        # Подпись кнопки всегда в _() — даже если у соседней кнопки
+        # ("English") обёртки нет: так строку можно переводить.
+        new_line = child_indent + 'textbutton _("{0}") action Language("{1}")'.format(name, lang)
         if not lines[last_content].endswith(("\n", "\r")):
             lines[last_content] += nl
         lines[last_content + 1:last_content + 1] = [new_line + nl]

@@ -113,6 +113,31 @@ _RE_TOKEN = re.compile(re.escape(_TOKEN_OPEN) + r'(\d+)' + re.escape(_TOKEN_CLOS
 
 DEFAULT_MARKER_TEMPLATE = "Zqtx{N}xtqZ"
 
+# Режим "Без разделителя": теги/подстановки НЕ заменяются маркерами, в
+# переводчик уходит исходная строка как есть ({b}, [name], %s и т.д.).
+# Целостность проверяется не по маркерам, а прямым сравнением списка
+# тегов/подстановок в оригинале и переводе (см. _structure_ok()).
+NO_MARKER_LABEL = "Без разделителя"
+_NO_MARKERS = False
+
+# Куски, которые в режиме без разделителя НЕ сравниваются: экранированные
+# кавычки/слэши (translate_quoted() сам экранирует "голые" кавычки) и
+# "% x" с пробелом после процента (это обычный текст вроде "100% sure",
+# а не формат-спецификатор).
+_IGNORED_PIECES = ('\\"', '\\\\')
+_RE_BRACE_TAG = re.compile(r'\{[^{}]*\}')
+
+
+def set_no_markers():
+    """Включает режим "без разделителя" для ВСЕХ последующих вызовов
+    (вызывать до старта рабочего потока, как и set_marker())."""
+    global _NO_MARKERS
+    _NO_MARKERS = True
+
+
+def is_no_markers():
+    return _NO_MARKERS
+
 
 def parse_marker_template(template):
     """Разбирает шаблон маркера вида 'Zqtx{N}xtqZ' на пару (начало, конец).
@@ -147,7 +172,8 @@ def set_marker(open_part, close_part):
     содержат маркеры старого формата, и с другим форматом они просто не
     будут найдены в кэше по ключу — то есть безвредно, но переведутся
     заново."""
-    global _TOKEN_OPEN, _TOKEN_CLOSE, _RE_TOKEN
+    global _TOKEN_OPEN, _TOKEN_CLOSE, _RE_TOKEN, _NO_MARKERS
+    _NO_MARKERS = False
     _TOKEN_OPEN = open_part
     _TOKEN_CLOSE = close_part
     _RE_TOKEN = re.compile(re.escape(open_part) + r'(\d+)' + re.escape(close_part))
@@ -184,6 +210,8 @@ def protect(text):
     препинания — тогда после восстановления может остаться один лишний
     пробел перед ним; это несравнимо безопаснее, чем полностью
     непереведённая фраза)."""
+    if _NO_MARKERS:
+        return text, []
     tokens = []
 
     def repl(m):
@@ -253,6 +281,19 @@ def translate_quoted(quoted, translate_fn):
     translated = translate_fn(protected)
     if translated is None:
         return quoted
+    if _NO_MARKERS and ("\n" not in translated and "\r" not in translated):
+        # Режим "без разделителя": теги остались в тексте как есть,
+        # вместо проверки маркеров сравниваем списки тегов/подстановок
+        # в оригинале и переводе.
+        translated = re.sub(r'(?<!\\)"', r'\\"', translated)
+        if _ends_with_odd_backslash(translated):
+            # Одиночный "\" в конце съел бы закрывающую кавычку строки.
+            return quoted
+        if not tokens_preserved(protected, translated):
+            return quoted
+        if markers_collapsed(protected, translated):
+            return quoted
+        return '"' + translated + '"'
     if "\n" in translated or "\r" in translated:
         # Переводчик вернул перевод из нескольких физических строк (в
         # основном встречается у LLM-переводчиков вроде Translate Gemma,
@@ -284,6 +325,82 @@ def translate_quoted(quoted, translate_fn):
     translated = re.sub(r'(?<!\\)"', r'\\"', translated)
     final_inner = restore(translated, tokens)
     return '"' + final_inner + '"'
+
+
+def _ends_with_odd_backslash(text):
+    n = len(text) - len(text.rstrip("\\"))
+    return n % 2 == 1
+
+
+def _token_matches(text):
+    """Все "защищённые" куски текста: маркеры (обычный режим) либо сами
+    теги/подстановки (режим без разделителя)."""
+    return list((_RE_PROTECT if _NO_MARKERS else _RE_TOKEN).finditer(text))
+
+
+def _strip_tokens(text):
+    return (_RE_PROTECT if _NO_MARKERS else _RE_TOKEN).sub('', text)
+
+
+def _pieces(text):
+    """Режим без разделителя: список тегов/подстановок строки, без тех,
+    что сознательно не сравниваются (см. _IGNORED_PIECES)."""
+    result = []
+    for m in _RE_PROTECT.finditer(text):
+        p = m.group(0)
+        if p in _IGNORED_PIECES or p.startswith('% '):
+            continue
+        result.append(p)
+    return result
+
+
+def _structure_ok(source, translated):
+    """Режим без разделителя: набор тегов/подстановок в переводе совпадает
+    с оригиналом по количеству и составу, а фигурные теги {..} ещё и
+    идут в том же порядке (вложенность {b}{color}...{/color}{/b} важна).
+    Порядок [переменных] и %-подстановок не проверяется — в русском они
+    вполне могут законно меняться местами."""
+    ps, pt = _pieces(source), _pieces(translated)
+    if sorted(ps) != sorted(pt):
+        return False
+    return [p for p in ps if p.startswith('{')] == [p for p in pt if p.startswith('{')]
+
+
+def _adjacent_brace_pairs(text):
+    pairs = set()
+    prev_end = None
+    idx = 0
+    for m in _RE_BRACE_TAG.finditer(text):
+        if prev_end is not None and text[prev_end:m.start()].strip() == "":
+            pairs.add((idx - 1, idx))
+        prev_end = m.end()
+        idx += 1
+    return pairs
+
+
+def boundary_text(text):
+    """(текст до первого защищённого куска, текст после последнего)."""
+    matches = _token_matches(text)
+    if not matches:
+        return text, ""
+    return text[:matches[0].start()], text[matches[-1].end():]
+
+
+_MIN_BOUNDARY_CHARS = 3
+
+
+def looks_truncated(source_protected, translated):
+    """True, если текст до первого тега/маркера или после последнего в
+    оригинале был содержательным, а в переводе пропал целиком (модель
+    перевела только то, что внутри тегов). Общая проверка для Translate
+    Gemma и Gemma 4."""
+    src_lead, src_trail = boundary_text(source_protected)
+    tr_lead, tr_trail = boundary_text(translated)
+    if len(src_lead.strip()) >= _MIN_BOUNDARY_CHARS and not tr_lead.strip():
+        return True
+    if len(src_trail.strip()) >= _MIN_BOUNDARY_CHARS and not tr_trail.strip():
+        return True
+    return False
 
 
 def _all_tokens_present(text, count):
@@ -319,6 +436,8 @@ def markers_collapsed(source_protected, translated):
     съехала наружу, а сами теги слиплись друг с другом в конце строки.
     Дополняет _all_tokens_present() — та проверяет только сам факт
     присутствия маркеров, эта — их взаимное расположение."""
+    if _NO_MARKERS:
+        return bool(_adjacent_brace_pairs(translated) - _adjacent_brace_pairs(source_protected))
     return bool(_adjacent_marker_pairs(translated) - _adjacent_marker_pairs(source_protected))
 
 
@@ -328,7 +447,7 @@ def _has_translatable_content(protected):
     переводить. Строка вроде "{w}{nw}" (только теги, без единого
     слова) после protect() превращается в один маркер или несколько
     маркеров подряд — переводить там нечего."""
-    stripped = _RE_TOKEN.sub('', protected)
+    stripped = _strip_tokens(protected)
     return any(ch.isalnum() for ch in stripped)
 
 
@@ -362,6 +481,8 @@ def tokens_preserved(source_protected, translated):
     отдельный файл, и порча в нём переживёт эту очистку)."""
     if translated is None:
         return False
+    if _NO_MARKERS:
+        return _structure_ok(source_protected, translated)
     needed = {int(m.group(1)) for m in _RE_TOKEN.finditer(source_protected)}
     if not needed:
         return True
@@ -474,7 +595,15 @@ def collect_needed_texts(lines, overwrite=False):
     return needed
 
 
-def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None):
+def _failed_msg(orig_quoted, file_name):
+    msg = "Не удалось перевести (оставлено как есть): {0!r}".format(orig_quoted[:80])
+    if file_name:
+        msg += " в файле {0}".format(file_name)
+    return msg
+
+
+def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None,
+                  file_name=None):
     """lines — список строк файла (с переносами строк на конце, как из
     readlines()/splitlines(keepends=True)). Возвращает новый список строк.
     translate_fn(text) -> str, где text — защищённый текст без кавычек.
@@ -513,8 +642,7 @@ def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None):
                 # когда, например, переводчик будет доступнее.
                 stats['failed'] += 1
                 log(
-                    "Не удалось перевести (оставлено как есть): {0!r}"
-                    .format(entry['orig_quoted'][:80])
+                    _failed_msg(entry['orig_quoted'], file_name)
                 )
                 continue
             if entry['type'] == 'old_new':
@@ -532,7 +660,8 @@ def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None):
 
 
 def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
-                              overwrite=False, stats=None, log=None):
+                              overwrite=False, stats=None, log=None,
+                              file_name=None):
     """Аналог process_lines(), но для контекстных движков (Translate
     Gemma): строки обрабатываются строго по порядку сверху вниз, с
     переносимым состоянием "предыдущая реплика/перевод". Это состояние
@@ -593,8 +722,7 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
         if translated == entry['orig_quoted']:
             stats['failed'] += 1
             log(
-                "Не удалось перевести (оставлено как есть): {0!r}"
-                .format(entry['orig_quoted'][:80])
+                _failed_msg(entry['orig_quoted'], file_name)
             )
             if is_dialogue:
                 # Реплика реально прозвучала (на английском) — не

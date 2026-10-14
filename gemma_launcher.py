@@ -45,7 +45,7 @@ def _host_port_from_url(base_url):
     return host, port
 
 
-def build_command(exe_path, model_path, ngl, np, ctx, n_predict, base_url):
+def build_command(exe_path, model_path, ngl, np, ctx, n_predict, base_url, extra_args=None):
     host, port = _host_port_from_url(base_url)
     return [
         exe_path,
@@ -54,12 +54,14 @@ def build_command(exe_path, model_path, ngl, np, ctx, n_predict, base_url):
         "-np", str(np),
         "-c", str(ctx),
         "-n", str(n_predict),
+        *(extra_args or []),
         "--host", host,
         "--port", str(port),
     ]
 
 
-def launch(llama_folder, model_path, ngl, np, ctx, n_predict, base_url, log=None):
+def launch(llama_folder, model_path, ngl, np, ctx, n_predict, base_url, log=None,
+           extra_args=None):
     """Находит llama-server.exe в llama_folder и запускает его в новом
     окне консоли с указанными параметрами. Не ждёт завершения — сервер
     работает, пока окно открыто. Возвращает использованную команду
@@ -68,10 +70,10 @@ def launch(llama_folder, model_path, ngl, np, ctx, n_predict, base_url, log=None
     if not model_path or not os.path.isfile(model_path):
         raise GemmaLauncherError(
             "Файл модели .gguf не найден: {0!r}. Укажите его в поле "
-            "«Модель Translate Gemma .gguf».".format(model_path)
+            "с путём к модели .gguf.".format(model_path)
         )
     exe_path = find_exe(llama_folder)
-    cmd = build_command(exe_path, model_path, ngl, np, ctx, n_predict, base_url)
+    cmd = build_command(exe_path, model_path, ngl, np, ctx, n_predict, base_url, extra_args)
     log("Найден llama-server: {0}".format(exe_path))
     log("Запускаю: {0}".format(
         " ".join('"{0}"'.format(c) if " " in c else c for c in cmd)
