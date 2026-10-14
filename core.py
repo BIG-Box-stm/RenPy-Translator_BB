@@ -79,9 +79,13 @@ _RE_FORMAT_SPEC = (
     r'|%[#0\-+ ]*\d*(?:\.\d+)?[a-zA-Z]'          # %s, %d, %.2f, ...
     r'|%%'                                        # экранированный %% (буквальный процент)
 )
-_RE_PROTECT = re.compile(
-    _RE_FORMAT_SPEC + r'|\{[^{}]*\}|\[[^\[\]]*\]|\\n|\\"|\\\\'
-)
+_PROTECT_ALT = _RE_FORMAT_SPEC + r'|\{[^{}]*\}|\[[^\[\]]*\]|\\n|\\"|\\\\'
+_RE_PROTECT = re.compile(_PROTECT_ALT)
+# Серия защищённых кусков подряд, без единого символа между ними
+# ({b}{color=..} или {/color}{/b}). В режимах с разделителем вся такая
+# серия прячется под ОДИН маркер: меньше маркеров — меньше шансов, что
+# переводчик потеряет, переставит или слепит их (см. protect()).
+_RE_PROTECT_RUN = re.compile('(?:' + _PROTECT_ALT + ')+')
 
 # Маркер-обёртка для защищённых кусков текста.
 #
@@ -230,7 +234,7 @@ def protect(text):
             marker = marker + " "
         return marker
 
-    return _RE_PROTECT.sub(repl, text), tokens
+    return _RE_PROTECT_RUN.sub(repl, text), tokens
 
 
 def restore(text, tokens):

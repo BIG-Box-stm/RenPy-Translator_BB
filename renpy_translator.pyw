@@ -41,6 +41,7 @@ import deepl_translate
 import eta
 import game_patcher
 import gemma4_translate
+import google_api_translate
 import gemma_launcher
 import gtranslate
 import libretranslate_launcher
@@ -91,6 +92,8 @@ MARKER_PRESETS = [
     "@@{N}@@",
     "Zqtx{N}xtqZ",
     "[ZXQPROTECTEDTOKEN{N}QXZ]",
+    "{tag{N}}",
+    "[TOKEN{N}]",
 ]
 
 # Значения по умолчанию для размера пачки/задержки — берутся прямо из
@@ -158,6 +161,10 @@ class App(tk.Tk):
         self.translate_names_var = tk.BooleanVar(value=False)
         self.engine_var = tk.StringVar(value="Google Translate (без ключа)")
         self.deepl_key_var = tk.StringVar()
+        # Необязательный ключ официального Google Cloud Translation API (пусто =
+        # бесплатный неофициальный эндпоинт). Поле ключа в окне общее для
+        # Google и DeepL, но значения у них раздельные.
+        self.google_key_var = tk.StringVar()
         self.libre_url_var = tk.StringVar(value=libretranslate_translate.DEFAULT_URL)
         self.libre_key_var = tk.StringVar()
         self.marker_var = tk.StringVar(value=core.NO_MARKER_LABEL)
@@ -257,7 +264,8 @@ class App(tk.Tk):
         self.engine_combo.grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.engine_combo.bind("<<ComboboxSelected>>", self._on_engine_changed)
 
-        ttk.Label(frame_engine, text="Ключ DeepL API:").grid(row=0, column=1, sticky="w", padx=(20, 0))
+        self.api_key_label = ttk.Label(frame_engine, text="Ключ DeepL API:")
+        self.api_key_label.grid(row=0, column=1, sticky="w", padx=(20, 0))
         self.deepl_key_entry = ttk.Entry(
             frame_engine, textvariable=self.deepl_key_var, width=30, show="•",
             state="disabled",
@@ -374,10 +382,11 @@ class App(tk.Tk):
         self.prompt_combo.grid(row=1, column=1, sticky="w", padx=8, pady=(0, 0))
         self.batch_defaults_label = ttk.Label(group_translate, text="", justify="left")
         self.batch_defaults_label.grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 0))
-        ttk.Label(
+        self.batch_note_label = ttk.Label(
             group_translate,
             text="(оставьте поля пустыми, чтобы использовать эти значения)",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 8))
+        )
+        self.batch_note_label.grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 8))
 
         ttk.Label(group_lang, text="Имя языка:").grid(row=0, column=0, sticky="w", **gt_pad)
         ttk.Label(group_lang, text="Папка перевода:").grid(row=0, column=1, sticky="w", **gt_pad)
@@ -751,7 +760,21 @@ class App(tk.Tk):
 
     def _on_engine_changed(self, _event=None):
         key = self._current_engine_key()
-        self.deepl_key_entry.configure(state="normal" if key == "deepl" else "disabled")
+        # Поле ключа API: у Google (необязательный, без него — бесплатный
+        # эндпоинт) и DeepL; для офлайн-движков скрыто.
+        if key in ("google", "deepl"):
+            self.api_key_label.configure(
+                text="Ключ Google API:" if key == "google" else "Ключ DeepL API:"
+            )
+            self.deepl_key_entry.configure(
+                textvariable=self.google_key_var if key == "google" else self.deepl_key_var,
+                state="normal",
+            )
+            self.api_key_label.grid()
+            self.deepl_key_entry.grid()
+        else:
+            self.api_key_label.grid_remove()
+            self.deepl_key_entry.grid_remove()
 
         show_libre = key == "libretranslate"
         for w in (self.libre_url_label, self.libre_url_entry,
@@ -795,6 +818,13 @@ class App(tk.Tk):
         for w in (self.batch_items_label, self.batch_items_entry,
                   self.batch_delay_label, self.batch_delay_entry):
             w.grid() if show_batch_fields else w.grid_remove()
+
+        # Подсказка про пустые поля относится к «Строк в пачке»/«Задержке»;
+        # у нейросетевых движков этих полей нет — скрываем и подсказку.
+        if show_gemma or show_gemma4:
+            self.batch_note_label.grid_remove()
+        else:
+            self.batch_note_label.grid()
 
         if show_gemma or show_gemma4:
             self.batch_defaults_label.configure(text="")
@@ -1036,6 +1066,7 @@ class App(tk.Tk):
             }
 
         deepl_key = self.deepl_key_var.get().strip()
+        google_key = self.google_key_var.get().strip()
         if engine == "deepl" and not deepl_key:
             messagebox.showerror(
                 "Нужен ключ DeepL",
@@ -1093,8 +1124,8 @@ class App(tk.Tk):
         self.worker_thread = threading.Thread(
             target=self._worker,
             args=(lang_dir, files, src_code, dest_code, overwrite, use_cache,
-                  engine, deepl_key, libre_url, libre_key, batch_items, batch_delay,
-                  gemma4_cfg),
+                  engine, google_key if engine == "google" else deepl_key,
+                  libre_url, libre_key, batch_items, batch_delay, gemma4_cfg),
             daemon=True,
         )
         self.worker_thread.start()
@@ -1629,7 +1660,7 @@ class App(tk.Tk):
     # Фоновый поток перевода
     # ------------------------------------------------------------------
     def _worker(self, lang_dir, files, src_code, dest_code, overwrite, use_cache,
-                engine, deepl_key, libre_url, libre_key, batch_items=None,
+                engine, api_key, libre_url, libre_key, batch_items=None,
                 batch_delay=None, gemma4_cfg=None):
         cache_names = {
             "google": project.CACHE_FILENAME,
@@ -1668,7 +1699,7 @@ class App(tk.Tk):
 
         if engine == "deepl":
             translator = deepl_translate.DeepLTranslator(
-                api_key=deepl_key, src=src_code, dest=dest_code, cache=cache,
+                api_key=api_key, src=src_code, dest=dest_code, cache=cache,
                 log=self._log, on_progress=on_progress,
                 delay=batch_delay, batch_items=batch_items,
             )
@@ -1684,6 +1715,18 @@ class App(tk.Tk):
                 base_url=gemma4_cfg["url"], system_prompt=gemma4_cfg["prompt"],
                 np=gemma4_cfg["np"], max_tokens=gemma4_cfg["n_predict"],
                 cache=cache, log=self._log, on_progress=on_progress,
+            )
+        elif api_key:
+            # engine == "google" и введён ключ -> официальный Cloud Translation
+            # API (кэш общий с бесплатным Google: перевод тот же по смыслу, и
+            # так ключом можно «добить» строки, на которых бесплатный
+            # эндпоинт упёрся в лимит).
+            engine_titles["google"] = "Google Cloud Translation (по ключу API)"
+            self._log("Google: используется официальный API по введённому ключу.")
+            translator = google_api_translate.GoogleApiTranslator(
+                api_key=api_key, src=src_code, dest=dest_code, cache=cache,
+                log=self._log, on_progress=on_progress,
+                delay=batch_delay, batch_items=batch_items,
             )
         else:
             translator = gtranslate.CachedTranslator(
