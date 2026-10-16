@@ -37,8 +37,8 @@ DEFAULT_N_PREDICT = 256
 # получает снаружи (context_prompt / no_context_prompt).
 import prompts
 
-SYSTEM_PROMPT = prompts.DEFAULTS["context"]
-SYSTEM_PROMPT_NO_CONTEXT = prompts.DEFAULTS["1"]
+SYSTEM_PROMPT = prompts.BUILTIN["prompt_context.txt"]
+SYSTEM_PROMPT_NO_CONTEXT = prompts.BUILTIN["prompt_1.txt"]
 
 
 class GemmaError(Exception):

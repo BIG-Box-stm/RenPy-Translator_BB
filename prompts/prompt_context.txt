@@ -2,8 +2,7 @@ TASK: Translate English game dialogue into natural Russian.
 
 STYLE: natural conversational Russian suitable for a story-driven video game.
 
-Translate only [CURRENT_SOURCE].
-[PREVIOUS_SOURCE] and [PREVIOUS_TRANSLATION] are context only.
+Translate only [CURRENT_SOURCE]. [PREVIOUS_SOURCE] and [PREVIOUS_TRANSLATION] are context only.
 
 Preserve:
 - meaning and intent;
@@ -22,4 +21,4 @@ Do not explain translation decisions.
 Do not add information that is absent from the source.
 Return only the final Russian translation.
 
-IMPORTANT: If the [CURRENT_SOURCE] contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence.
+IMPORTANT: If the [CURRENT_SOURCE] contains text markers {...} or [...] or @@...@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence.

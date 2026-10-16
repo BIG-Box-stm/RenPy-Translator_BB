@@ -30,6 +30,7 @@ import concurrent.futures
 import hashlib
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -38,6 +39,7 @@ from tkinter import filedialog, messagebox, ttk
 import character_names
 import core
 import deepl_translate
+import editor_store
 import eta
 import game_patcher
 import gemma4_translate
@@ -52,6 +54,7 @@ import renpy_sdk
 import rpa_tools
 import rpy_autofix
 import translate_gemma
+import ui_editor
 import unrpyc_manager
 
 APP_TITLE = "Universal RenPy Translator"
@@ -191,6 +194,8 @@ class App(tk.Tk):
         self.gemma4_url_var = tk.StringVar(value=gemma4_translate.DEFAULT_URL)
         # Выбор промпта для нейросетевых движков (см. prompts.py).
         self.prompt_var = tk.StringVar(value=prompts.DEFAULT_LABEL)
+        # «Согласование по роду» (экспериментально, только Gemma 4).
+        self.gender_var = tk.BooleanVar(value=False)
 
         self.log_queue = queue.Queue()
         self.worker_thread = None
@@ -377,7 +382,8 @@ class App(tk.Tk):
         self.prompt_label.grid(row=0, column=1, sticky="w", **gt_pad)
         self.prompt_combo = ttk.Combobox(
             group_translate, textvariable=self.prompt_var, state="readonly", width=10,
-            values=list(prompts.LABELS),
+            values=[label for label, _f in prompts.list_prompts()],
+            postcommand=self._refresh_prompt_list,
         )
         self.prompt_combo.grid(row=1, column=1, sticky="w", padx=8, pady=(0, 0))
         self.batch_defaults_label = ttk.Label(group_translate, text="", justify="left")
@@ -387,6 +393,13 @@ class App(tk.Tk):
             text="(оставьте поля пустыми, чтобы использовать эти значения)",
         )
         self.batch_note_label.grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 8))
+        # Включается только для Gemma 4 (см. _on_engine_changed). Translate
+        # Gemma и так получает имя говорящего через RULES в контекстном режиме.
+        self.gender_check = ttk.Checkbutton(
+            group_translate, text="Согласование по роду (экспериментально)",
+            variable=self.gender_var, state="disabled",
+        )
+        self.gender_check.grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
 
         ttk.Label(group_lang, text="Имя языка:").grid(row=0, column=0, sticky="w", **gt_pad)
         ttk.Label(group_lang, text="Папка перевода:").grid(row=0, column=1, sticky="w", **gt_pad)
@@ -447,6 +460,12 @@ class App(tk.Tk):
             command=self._start_update_fonts, state="disabled",
         )
         self.update_fonts_btn.grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(8, 0))
+
+        self.editor_btn = ttk.Button(
+            frame_opts, text="Редактор переводов", command=self._open_editor,
+        )
+        self.editor_btn.grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(8, 0))
+
 
         self.status_var = tk.StringVar(value="")
         self.eta_var = tk.StringVar(value="")
@@ -804,6 +823,7 @@ class App(tk.Tk):
         # Translate Gemma он подменяет промпт для строк меню/интерфейса
         # (old/new), диалоги идут с контекстным промптом; у Gemma 4 —
         # промпт для всех строк.
+        self.gender_check.configure(state="normal" if show_gemma4 else "disabled")
         show_prompt = show_gemma or show_gemma4
         for w in (self.prompt_label, self.prompt_combo):
             w.grid() if show_prompt else w.grid_remove()
@@ -953,6 +973,47 @@ class App(tk.Tk):
         except Exception as e:
             self._log("ОШИБКА при сборе имён персонажей: {0}".format(e))
 
+    def _open_editor(self):
+        """Окно «Редактор переводов» (ui_editor.py): ручная правка строк,
+        которые не удалось перевести. Правленные вручную строки защищены
+        от перезаписи при следующем автопереводе."""
+        lang_folder = self.lang_var.get()
+        if not self.tl_dir or not lang_folder:
+            messagebox.showerror("Ошибка", "Сначала выберите папку игры и языковую папку перевода.")
+            return
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            messagebox.showinfo(
+                "Идёт перевод",
+                "Пока идёт перевод, редактор открыть нельзя — программа и вы "
+                "правили бы одни и те же файлы. Дождитесь окончания или нажмите «Остановить».",
+            )
+            return
+        lang_dir = os.path.join(self.tl_dir, lang_folder)
+        ui_editor.EditorWindow(self, lang_dir, lang_folder, log=self._log)
+
+    def _refresh_prompt_list(self):
+        """Обновляет выпадающий список «Промпт» по файлам *.txt в папке
+        prompts/ (вызывается при каждом открытии списка — новый файл
+        появляется без перезапуска программы)."""
+        items = prompts.list_prompts()
+        labels = [label for label, _f in items]
+        self.prompt_combo.configure(values=labels)
+        if self.prompt_var.get() not in labels:
+            self.prompt_var.set(labels[0] if labels else prompts.DEFAULT_LABEL)
+
+    def _load_selected_prompt(self):
+        """(имя файла, текст) выбранного промпта. Если файл пуст или не
+        читается — показывает ошибку и возвращает (файл, None)."""
+        filename = prompts.file_for_label(self.prompt_var.get())
+        text = prompts.load_file(filename, log=self._log)
+        if text is None:
+            messagebox.showerror(
+                "Пустой промпт",
+                "Файл промпта prompts/{0} пуст или не читается. Впишите в него "
+                "текст промпта либо выберите другой промпт в списке.".format(filename),
+            )
+        return filename, text
+
     def _apply_marker_setting(self):
         """Читает поле «Разделитель» и включает нужный режим в core:
         «Без разделителя» либо маркер по шаблону. False — шаблон неверен
@@ -1022,8 +1083,10 @@ class App(tk.Tk):
                 return
             gemma_url = self.gemma_url_var.get().strip() or translate_gemma.DEFAULT_URL
 
-            ctx_prompt = prompts.load("context", log=self._log)
-            no_ctx_prompt = prompts.load(prompts.key_for_label(self.prompt_var.get()), log=self._log)
+            ctx_prompt = prompts.load_context(log=self._log)
+            _no_ctx_file, no_ctx_prompt = self._load_selected_prompt()
+            if no_ctx_prompt is None:
+                return
 
             self.stop_requested = False
             self.start_btn.configure(state="disabled")
@@ -1053,16 +1116,27 @@ class App(tk.Tk):
             except ValueError as e:
                 messagebox.showerror("Неверное значение", str(e))
                 return
-            prompt_key = prompts.key_for_label(self.prompt_var.get())
-            prompt_text = prompts.load(prompt_key, log=self._log)
+            gender_mode = bool(self.gender_var.get())
+            prompt_file, prompt_text = self._load_selected_prompt()
+            if prompt_text is None:
+                return
+            if gender_mode:
+                self._log(
+                    "Режим «Согласование по роду»: строки уходят как «Имя: текст», "
+                    "используется выбранный промпт ({0}) — он должен объяснять "
+                    "модели этот формат.".format(prompt_file)
+                )
             gemma4_cfg = {
                 "url": self.gemma4_url_var.get().strip() or gemma4_translate.DEFAULT_URL,
                 "np": max(1, g4_np),
+                "gender": gender_mode,
                 "n_predict": g4_n,
                 "prompt": prompt_text,
                 # Свой кэш на каждый промпт (и на каждую правку его текста).
-                "cache_tag": "p{0}_{1}".format(
-                    prompt_key, hashlib.sha1(prompt_text.encode("utf-8")).hexdigest()[:8]),
+                "cache_tag": "{0}p_{1}_{2}".format(
+                    "g" if gender_mode else "",
+                    re.sub(r"\W+", "_", os.path.splitext(prompt_file)[0]),
+                    hashlib.sha1(prompt_text.encode("utf-8")).hexdigest()[:8]),
             }
 
         deepl_key = self.deepl_key_var.get().strip()
@@ -1738,6 +1812,37 @@ class App(tk.Tk):
 
         total_stats = {"translated": 0, "skipped": 0, "failed": 0, "nothing_to_translate": 0}
 
+        # Строки, правленные вручную в «Редакторе переводов», не
+        # перезаписываются никогда (даже при галочке «Перезаписывать...»).
+        manual = editor_store.load_manual(lang_dir)
+
+        def protected_for(path):
+            return manual.get(editor_store.rel_of(lang_dir, path))
+
+        # --- Режим «Согласование по роду» (только Gemma 4): в запрос
+        # добавляется имя говорящего из define ... = Character(...). -----
+        key_fn = resolve_fn = None
+        if gemma4_cfg and gemma4_cfg.get("gender"):
+            names = {}
+            if self.game_dir:
+                try:
+                    names = character_names.scan_character_names(self.game_dir)
+                except Exception as e:
+                    self._log("  ОШИБКА при сканировании персонажей: {0}".format(e))
+            self._log("Найдено определений персонажей: {0}.".format(len(names)))
+            key_fn = translator.key_for
+            # Уже переведённые имена персонажей (_character_names.txt) —
+            # чтобы срезать их из ответа модели, даже если в самой реплике
+            # есть двоеточие.
+            try:
+                names_file = os.path.join(lang_dir, character_names.NAMES_FILENAME)
+                for e in character_names.parse_names_file(names_file):
+                    if e["new"] and e["new"] != e["old"]:
+                        translator.add_known_prefix(e["old"], e["new"])
+            except Exception as e:
+                self._log("  Не удалось прочитать файл имён: {0}".format(e))
+            resolve_fn = lambda who: character_names.speaker_label_for_gender(who, names)
+
         # --- Фаза 1: читаем все файлы и собираем уникальные строки,
         # которые нужно перевести, чтобы перевести их пачками (несколько
         # строк за один запрос) — это в разы быстрее, чем по одной. -----
@@ -1751,17 +1856,28 @@ class App(tk.Tk):
                 self._log("  ОШИБКА чтения файла {0}: {1}".format(path, e))
                 continue
             files_lines[path] = lines
-            all_needed |= core.collect_needed_texts(lines, overwrite=overwrite)
+            all_needed |= core.collect_needed_texts(
+                lines, overwrite=overwrite, key_fn=key_fn, resolve_fn=resolve_fn,
+                protected=protected_for(path))
 
         already_cached = sum(1 for t in all_needed if t in cache)
         self._log(
             "Найдено уникальных строк для перевода: {0} (из них уже в кэше: {1})."
             .format(len(all_needed), already_cached)
         )
+        # Gemma 4 переводит долго (десятки тысяч строк — часы), поэтому для
+        # неё перевод идёт ФАЙЛ ЗА ФАЙЛОМ и результат записывается в .rpy
+        # сразу после каждого файла, а не после перевода всей игры (иначе
+        # при остановке/сбое на середине не остаётся ничего в самих файлах,
+        # хотя переводы лежат в кэше). Пакетные движки (Google/DeepL/Libre)
+        # быстрые и выигрывают от общих больших пачек, у них схема прежняя.
+        incremental = engine == "gemma4"
         if all_needed:
-            if engine == "gemma4":
+            if incremental:
                 self._log(
-                    "Перевожу построчно, потоков: {0}...".format(gemma4_cfg["np"])
+                    "Перевожу построчно, потоков: {0}. Переводы записываются в "
+                    "файлы .rpy сразу после обработки каждого файла..."
+                    .format(gemma4_cfg["np"])
                 )
             else:
                 self._log("Перевожу пачками (несколько строк за один запрос)...")
@@ -1773,37 +1889,48 @@ class App(tk.Tk):
             phase1_total["n"] = pending
             if pending > 0:
                 self.log_queue.put(("__PHASE1_PROGRESS__", 0, pending))
-            translator.warm_batch(all_needed)
-            if use_cache:
-                project.save_cache(lang_dir, cache, cache_name)
-            self._log(
-                "Пакетный перевод завершён: запросов к {0} — {1} "
-                "(из них пакетных — {2}, ими переведено {3} строк), "
-                "прямо из кэша — {4}.".format(
-                    engine_titles[engine],
-                    translator.stats["requests"], translator.stats["batch_requests"],
-                    translator.stats["batched_lines"], translator.stats["cache_hits"],
+            if not incremental:
+                translator.warm_batch(all_needed)
+                if use_cache:
+                    project.save_cache(lang_dir, cache, cache_name)
+                self._log(
+                    "Пакетный перевод завершён: запросов к {0} — {1} "
+                    "(из них пакетных — {2}, ими переведено {3} строк), "
+                    "прямо из кэша — {4}.".format(
+                        engine_titles[engine],
+                        translator.stats["requests"], translator.stats["batch_requests"],
+                        translator.stats["batched_lines"], translator.stats["cache_hits"],
+                    )
                 )
-            )
 
         # --- Фаза 2: расставляем переводы по местам в каждом файле.
         # Благодаря фазе 1 это почти не делает новых сетевых запросов. ---
         total_files = len(files)
         for idx, path in enumerate(files, start=1):
             if self.stop_requested:
-                self._log("Остановлено пользователем.")
                 break
             rel = os.path.relpath(path, lang_dir)
             if path not in files_lines:
-                self.log_queue.put(("__PHASE2_PROGRESS__", idx, total_files, rel))
+                if not incremental:
+                    self.log_queue.put(("__PHASE2_PROGRESS__", idx, total_files, rel))
                 continue
             self._log("Обрабатываю: {0} [{1}/{2}]".format(rel, idx, total_files))
             try:
                 lines = files_lines[path]
                 file_stats = {"translated": 0, "skipped": 0, "failed": 0, "nothing_to_translate": 0}
+                if incremental:
+                    # Переводим строки ЭТОГО файла (параллельно, в -np потоков)
+                    # и тут же расставляем их по местам. Если нажали
+                    # «Остановить», всё, что успело перевестись, всё равно
+                    # записывается в файл (из кэша), а не пропадает.
+                    translator.warm_batch(core.collect_needed_texts(
+                        lines, overwrite=overwrite, key_fn=key_fn, resolve_fn=resolve_fn,
+                        protected=protected_for(path)))
                 new_lines = core.process_lines(
                     lines, translator, overwrite=overwrite, stats=file_stats,
-                    log=self._log, file_name=rel,
+                    log=(lambda m: None) if (incremental and self.stop_requested) else self._log,
+                    file_name=rel, key_fn=key_fn, resolve_fn=resolve_fn,
+                    protected=protected_for(path),
                 )
                 if file_stats["translated"] > 0:
                     project.write_lines(path, new_lines)
@@ -1824,9 +1951,14 @@ class App(tk.Tk):
             if use_cache:
                 project.save_cache(lang_dir, cache, cache_name)
 
-            self.log_queue.put(("__PHASE2_PROGRESS__", idx, total_files, rel))
+            if not incremental:
+                self.log_queue.put(("__PHASE2_PROGRESS__", idx, total_files, rel))
+            else:
+                self._log("  файл {0} из {1} готов".format(idx, total_files))
 
         self._log("")
+        if self.stop_requested:
+            self._log("Остановлено пользователем.")
         self._log(
             "Готово. Всего переведено строк: {0}, пропущено: {1}, "
             "не удалось перевести: {2}, без переводимого текста (только "
@@ -1842,7 +1974,7 @@ class App(tk.Tk):
                 translator.stats["rate_limit_hits"], translator.stats["errors"],
             )
         )
-        if total_stats["failed"] > 0:
+        if total_stats["failed"] > 0 and not self.stop_requested:
             self._log(
                 "{0} строк(и) остались непереведёнными (см. пометки "
                 "«Не удалось перевести» выше) — обычно это значит, что "
@@ -1912,10 +2044,16 @@ class App(tk.Tk):
         # тем же правилам, по которым потом идёт сам перевод
         # (core.count_pending), поэтому число совпадает с реальным
         # количеством обращений к модели. -------------------------------
+        manual = editor_store.load_manual(lang_dir)
+
+        def protected_for(path):
+            return manual.get(editor_store.rel_of(lang_dir, path))
+
         total_lines = 0
         for path in files:
             try:
-                total_lines += core.count_pending(project.read_lines(path), overwrite=overwrite)
+                total_lines += core.count_pending(
+                    project.read_lines(path), overwrite=overwrite, protected=protected_for(path))
             except Exception:
                 pass  # ошибку чтения этого файла честно покажет сам перевод ниже
         self._log("Строк к переводу: {0}.".format(total_lines))
@@ -1969,7 +2107,7 @@ class App(tk.Tk):
                 new_lines = core.process_lines_contextual(
                     lines, translate_and_count, resolve_speaker,
                     overwrite=overwrite, stats=file_stats, log=self._log,
-                    file_name=rel,
+                    file_name=rel, protected=protected_for(path),
                 )
                 if file_stats["translated"] > 0:
                     project.write_lines(path, new_lines)

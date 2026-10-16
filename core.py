@@ -494,6 +494,9 @@ def tokens_preserved(source_protected, translated):
     return needed <= found
 
 
+_RE_TRANSLATE_BLOCK = re.compile(r'^translate[ \t]+\S+[ \t]+([A-Za-z0-9_]+)[ \t]*:[ \t]*$')
+
+
 def find_translatable(lines):
     """Итератор мест для перевода в файле. Ничего не переводит и не
     меняет lines — только находит и описывает места. Общая логика для
@@ -501,8 +504,17 @@ def find_translatable(lines):
     рассинхронизировать правила определения "нужен перевод"."""
     n = len(lines)
     i = 0
+    block = ""          # id текущего блока "translate <язык> <id>:"
+    block_dlg_n = 0     # порядковый номер диалога внутри блока
     while i < n:
         line = _strip_eol(lines[i])
+
+        m_blk = _RE_TRANSLATE_BLOCK.match(line)
+        if m_blk:
+            block = m_blk.group(1)
+            block_dlg_n = 0
+            i += 1
+            continue
 
         # --- блок old / new -------------------------------------------
         m_old = RE_OLD.match(line)
@@ -516,6 +528,9 @@ def find_translatable(lines):
                     yield {
                         'type': 'old_new',
                         'orig_quoted': m_old.group('str'),
+                        # Стабильный ключ строки (для защиты ручных правок,
+                        # см. editor_store.py): для old/new — сам оригинал.
+                        'key': 's:' + m_old.group('str')[1:-1],
                         'new_line_idx': j,
                         'new_indent': m_new.group('indent'),
                         'current_inner': m_new.group('str')[1:-1],
@@ -538,8 +553,10 @@ def find_translatable(lines):
             if (m_d
                     and m_d.group('indent') == m_c.group('indent')
                     and m_d.group('who') == m_c.group('who')):
+                block_dlg_n += 1
                 yield {
                     'type': 'dialogue',
+                    'key': 'd:{0}#{1}'.format(block, block_dlg_n),
                     'orig_quoted': m_c.group('str'),
                     'code_line_idx': i + 1,
                     'code_indent': m_d.group('indent'),
@@ -553,7 +570,12 @@ def find_translatable(lines):
         i += 1
 
 
-def _is_untranslated(entry, overwrite):
+def _is_untranslated(entry, overwrite, protected=None):
+    # Строки, переведённые вручную в «Редакторе переводов» (protected —
+    # множество их ключей для этого файла), не перезаписываются никогда,
+    # даже при включённой галочке «Перезаписывать уже переведённые».
+    if protected and entry.get('key') in protected:
+        return False
     if overwrite:
         return True
     return entry['current_inner'] == '' or entry['is_dup_of_original']
@@ -570,7 +592,7 @@ def extract_protected_text(quoted):
     return protected
 
 
-def count_pending(lines, overwrite=False):
+def count_pending(lines, overwrite=False, protected=None):
     """Сколько строк в этом файле реально предстоит отправить на
     перевод (не переведены и в них есть что переводить). Нужен
     контекстному движку (Translate Gemma), у которого нет общего
@@ -580,22 +602,28 @@ def count_pending(lines, overwrite=False):
     совпадает с тем, сколько раз позже будет вызван переводчик."""
     count = 0
     for entry in find_translatable(lines):
-        if _is_untranslated(entry, overwrite) and needs_translation(entry['orig_quoted']):
+        if _is_untranslated(entry, overwrite, protected) and needs_translation(entry['orig_quoted']):
             count += 1
     return count
 
 
-def collect_needed_texts(lines, overwrite=False):
+def collect_needed_texts(lines, overwrite=False, key_fn=None, resolve_fn=None, protected=None):
     """Возвращает множество уникальных 'защищённых' текстов, которые
     нужно перевести в этом файле. Используется, чтобы заранее перевести
     всё одним пакетным проходом, прежде чем расставлять переводы по
     местам через process_lines()."""
     needed = set()
     for entry in find_translatable(lines):
-        if _is_untranslated(entry, overwrite):
-            protected = extract_protected_text(entry['orig_quoted'])
-            if protected:
-                needed.add(protected)
+        if _is_untranslated(entry, overwrite, protected):
+            protected_text = extract_protected_text(entry['orig_quoted'])
+            if protected_text:
+                if key_fn is not None:
+                    # Режим "с именем говорящего" (Gemma 4): ключ запроса —
+                    # "Имя: текст" (см. gemma4_translate.Gemma4Translator.key_for).
+                    speaker = resolve_fn(entry['who']) if (
+                        resolve_fn is not None and entry['type'] == 'dialogue') else None
+                    protected_text = key_fn(speaker, protected_text)
+                needed.add(protected_text)
     return needed
 
 
@@ -607,7 +635,7 @@ def _failed_msg(orig_quoted, file_name):
 
 
 def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None,
-                  file_name=None):
+                  file_name=None, key_fn=None, resolve_fn=None, protected=None):
     """lines — список строк файла (с переносами строк на конце, как из
     readlines()/splitlines(keepends=True)). Возвращает новый список строк.
     translate_fn(text) -> str, где text — защищённый текст без кавычек.
@@ -625,7 +653,7 @@ def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None,
     out = list(lines)
 
     for entry in find_translatable(out):
-        if _is_untranslated(entry, overwrite):
+        if _is_untranslated(entry, overwrite, protected):
             if not needs_translation(entry['orig_quoted']):
                 # Строка состоит только из тегов/подстановок — переводить
                 # нечего, и отправлять такое переводчику вредно (см.
@@ -633,7 +661,14 @@ def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None,
                 # это ни успехом, ни неудачей.
                 stats['nothing_to_translate'] += 1
                 continue
-            translated = translate_quoted(entry['orig_quoted'], translate_fn)
+            fn = translate_fn
+            if key_fn is not None:
+                # Режим "с именем говорящего": в переводчик уходит ключ
+                # "Имя: текст", а возвращается уже перевод БЕЗ имени.
+                speaker = resolve_fn(entry['who']) if (
+                    resolve_fn is not None and entry['type'] == 'dialogue') else None
+                fn = (lambda t, _s=speaker: translate_fn(key_fn(_s, t)))
+            translated = translate_quoted(entry['orig_quoted'], fn)
             if translated == entry['orig_quoted']:
                 # translate_quoted() откатился на исходный текст (переводчик
                 # не ответил, либо повредил защищённый маркер) — строка
@@ -665,7 +700,7 @@ def process_lines(lines, translate_fn, overwrite=False, stats=None, log=None,
 
 def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
                               overwrite=False, stats=None, log=None,
-                              file_name=None):
+                              file_name=None, protected=None):
     """Аналог process_lines(), но для контекстных движков (Translate
     Gemma): строки обрабатываются строго по порядку сверху вниз, с
     переносимым состоянием "предыдущая реплика/перевод". Это состояние
@@ -704,7 +739,7 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
         is_dialogue = entry['type'] == 'dialogue'
         rules_name = resolve_speaker_fn(entry['who']) if is_dialogue else None
 
-        if not _is_untranslated(entry, overwrite):
+        if not _is_untranslated(entry, overwrite, protected):
             stats['skipped'] += 1
             if is_dialogue:
                 previous_source = entry['orig_quoted'][1:-1]
@@ -751,3 +786,28 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
             previous_translation = translated[1:-1]
 
     return out
+
+
+def tag_problems(source_inner, translated_inner):
+    """Список проблем с тегами/подстановками между оригиналом и переводом
+    (оба — текст внутри кавычек, как в .rpy). Пустой список — всё в
+    порядке. Используется «Редактором переводов» при ручной правке."""
+    problems = []
+    ps, pt = _pieces(source_inner), _pieces(translated_inner)
+    only_src = list(ps)
+    only_tr = []
+    for p in pt:
+        if p in only_src:
+            only_src.remove(p)
+        else:
+            only_tr.append(p)
+    if only_src:
+        problems.append("нет в переводе: " + " ".join(only_src))
+    if only_tr:
+        problems.append("лишнее в переводе: " + " ".join(only_tr))
+    if not problems and not _structure_ok(source_inner, translated_inner):
+        problems.append("теги {..} идут в другом порядке")
+    if _ends_with_odd_backslash(translated_inner):
+        problems.append("строка заканчивается одиночным \\ (сломает кавычку)")
+    return problems
+

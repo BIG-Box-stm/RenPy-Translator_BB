@@ -17,6 +17,7 @@ gemma_launcher.launch().
 """
 
 import json
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -31,6 +32,50 @@ DEFAULT_CTX = 2048
 DEFAULT_N_PREDICT = 256
 
 EXTRA_SERVER_ARGS = ["--jinja", "--reasoning", "off"]
+
+
+_COLON = "[:：]"
+
+
+_RE_NAME_PREFIX = re.compile(
+    r'^\s*(?P<name>[A-ZА-ЯЁ][^\s:：{\[\]]*(?:\s+[^\s:：{\[\]]+){0,3}\s*(?:\([^()]{0,20}\))?)\s*'
+    + _COLON + r'\s+'
+)
+
+
+def split_speaker(result, speaker, source_text, known=None):
+    """Если модель вернула перевод вместе с именем говорящего ("Aelira:
+    Привет" / "Аэлира: Привет"), убирает имя — строку не бракуем, а
+    чиним. Возвращает (текст, найденный_префикс_или_None).
+
+    Порядок:
+    1. отправленное имя ("Aelira", "Player (male)", без скобки) и уже
+       ИЗВЕСТНЫЕ переводы имени `known` (из файла имён персонажей и те,
+       что программа уже встречала в ответах) — срезаются всегда, даже
+       если в самой реплике есть двоеточие ("Hello: ...");
+    2. незнакомое имя: любое имя (до 4 слов, первое с заглавной буквы,
+       возможно со скобкой) и двоеточие в начале — срезается, если в
+       исходной реплике двоеточий нет вообще, либо в ответе их стало БОЛЬШЕ,
+       чем в исходной реплике (появилось лишнее "Имя:"). Иначе легко
+       срезать кусок настоящего текста ("Иди сюда: пожалуйста")."""
+    if not speaker:
+        return result, None
+    base = speaker.split(" (")[0]
+    names = list(dict.fromkeys([speaker, base] + sorted(known or ())))
+    for name in names:
+        m = re.match(r'^\s*' + re.escape(name) + r'\s*' + _COLON + r'\s*', result, re.IGNORECASE)
+        if m and len(result) > m.end():
+            return result[m.end():], name
+    m = _RE_NAME_PREFIX.match(result)
+    if m and len(result) > m.end():
+        src_colons = len(re.findall(_COLON, source_text))
+        if src_colons == 0 or len(re.findall(_COLON, result)) > src_colons:
+            return result[m.end():], m.group("name").strip()
+    return result, None
+
+
+def strip_speaker(result, speaker, source_text, known=None):
+    return split_speaker(result, speaker, source_text, known)[0]
 
 
 class Gemma4Error(Exception):
@@ -101,6 +146,26 @@ class Gemma4Translator:
         self._fatal_error = None
         self._failed = set()   # строки, которые уже безуспешно пробовали в warm_batch()
         self._lock = threading.Lock()
+        # Режим "с именем говорящего": ключ запроса "Имя: текст" ->
+        # (имя, текст). Заполняется через key_for() до начала перевода.
+        self._parts = {}
+        # Известные переводы имён говорящих: speaker -> {"Венди", ...}.
+        # Пополняется из файла имён персонажей (add_known_prefix) и по ходу
+        # работы — когда имя в ответе удалось опознать и срезать.
+        self._known = {}
+
+    def add_known_prefix(self, speaker, translated_name):
+        if speaker and translated_name:
+            self._known.setdefault(speaker, set()).add(translated_name)
+
+    def key_for(self, speaker, text):
+        """Ключ запроса (он же ключ кэша): без говорящего — просто текст,
+        иначе "Имя: текст" (имя, затем двоеточие, без кавычек/звёздочек)."""
+        if not speaker:
+            return text
+        key = "{0}: {1}".format(speaker, text)
+        self._parts[key] = (speaker, text)
+        return key
 
     def stop(self):
         self._stopped = True
@@ -121,13 +186,15 @@ class Gemma4Translator:
             return "потерян текст за пределами тегов"
         return None
 
-    def _attempt(self, text):
-        """Перевод одной строки с повторами. Возвращает текст или None."""
+    def _attempt(self, request):
+        """Перевод одной строки с повторами. Возвращает текст или None.
+        request — либо сам текст, либо "Имя: текст" (см. key_for())."""
+        speaker, text = self._parts.get(request, (None, request))
         for attempt in range(1, self.retries + 1):
             if self._inactive():
                 return None
             try:
-                result = raw_translate(self.base_url, self.system_prompt, text, self.max_tokens)
+                result = raw_translate(self.base_url, self.system_prompt, request, self.max_tokens)
             except Gemma4ConnectionError as e:
                 self._fatal_error = e
                 self.log(str(e))
@@ -135,6 +202,9 @@ class Gemma4Translator:
             except Gemma4Error as e:
                 self.log("Ошибка Gemma 4 (попытка {0}/{1}): {2}.".format(attempt, self.retries, e))
                 continue
+            result, learned = split_speaker(result, speaker, text, self._known.get(speaker))
+            if learned:
+                self._known.setdefault(speaker, set()).add(learned)
             reason = self._bad_reason(text, result)
             if reason:
                 self.log(
@@ -164,11 +234,12 @@ class Gemma4Translator:
                 self.on_progress()
 
     def __call__(self, text):
-        if self._stopped or self._fatal_error:
-            return None
+        # Кэш читаем и после остановки: уже переведённое должно попасть в файл.
         if text in self.cache:
             self.stats["cache_hits"] += 1
             return self.cache[text]
+        if self._stopped or self._fatal_error:
+            return None
         if text in self._failed:
             return None
         self._work(text)

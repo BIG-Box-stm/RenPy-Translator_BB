@@ -2,41 +2,39 @@
 """
 Промпты нейросетевых переводчиков (Translate Gemma, Gemma 4).
 
-Сами тексты промптов лежат в обычных текстовых файлах в папке prompts/
-рядом с программой — их можно открыть в Блокноте и править; перезапуск
-программы не нужен, файлы перечитываются при каждом нажатии «Начать
-перевод»:
+Тексты промптов лежат в обычных текстовых файлах в папке prompts/ рядом
+с программой — их можно открыть в Блокноте и править; перезапускать
+программу не нужно (список файлов обновляется при каждом открытии
+выпадающего списка «Промпт», сам текст читается при каждом «Начать
+перевод»).
 
-    prompts/prompt_context.txt — перевод диалогов с контекстом
-                                 (только Translate Gemma; в выпадающий
-                                 список не входит);
-    prompts/prompt_1.txt       — «Промпт 1»: однострочный перевод без
-                                 контекста;
-    prompts/prompt_2.txt       — «Промпт 2»: однострочный перевод без
-                                 контекста (вариант из теста Gemma 4).
+    prompts/prompt_context.txt — перевод диалогов с контекстом (только
+                                 Translate Gemma; в выпадающий список не
+                                 входит);
+    prompts/prompt_1.txt,
+    prompts/prompt_2.txt       — встроенные «Промпт 1» и «Промпт 2»
+                                 (однострочный перевод без контекста);
+    любой другой *.txt         — появляется в списке «Промпт» под своим
+    в папке prompts/             именем (prompt_3.txt -> «Промпт 3», файл
+                                 «мой промпт.txt» -> «мой промпт»).
 
-Если файла нет или он пуст, берётся встроенный вариант (DEFAULTS ниже),
-а недостающий файл создаётся заново — так всегда можно вернуть исходный
-текст, просто удалив файл. На код программы выбор промпта не влияет:
-промпт — это только текст системного сообщения.
+Если встроенного файла (context/1/2) нет или он пуст, берётся встроенный
+вариант (BUILTIN ниже), а недостающий файл создаётся заново — так всегда
+можно вернуть исходный текст, просто удалив файл. На код программы выбор
+промпта не влияет: промпт — это только текст системного сообщения.
 """
 
 import os
+import re
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 
-FILES = {
-    "context": "prompt_context.txt",
-    "1": "prompt_1.txt",
-    "2": "prompt_2.txt",
-}
-
-# Подписи в выпадающем списке -> ключ промпта.
-LABELS = {"Промпт 1": "1", "Промпт 2": "2"}
+CONTEXT_FILE = "prompt_context.txt"
+DEFAULT_FILE = "prompt_1.txt"
 DEFAULT_LABEL = "Промпт 1"
 
-DEFAULTS = {
-    "context": """TASK: Translate English game dialogue into natural Russian.
+BUILTIN = {
+    "prompt_context.txt": """TASK: Translate English game dialogue into natural Russian.
 
 STYLE: natural conversational Russian suitable for a story-driven video game.
 
@@ -62,7 +60,7 @@ Return only the final Russian translation.
 
 IMPORTANT: If the [CURRENT_SOURCE] contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence.""",
 
-    "1": """TASK: Translate English game text into natural Russian.
+    "prompt_1.txt": """TASK: Translate English game text into natural Russian.
 
 STYLE: natural conversational Russian suitable for a story-driven video game.
 
@@ -83,7 +81,7 @@ Return only the final Russian translation.
 
 IMPORTANT: If the text line for translating contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence.""",
 
-    "2": """You are a professional English to Russian translator specializing in story-driven video games.
+    "prompt_2.txt": """You are a professional English to Russian translator specializing in story-driven video games.
 
 HARD RULES — PROTECTED TOKENS:
 
@@ -126,47 +124,82 @@ Do not split, merge or reorder source lines.""",
 
 }
 
-
-def _path(key):
-    return os.path.join(PROMPTS_DIR, FILES[key])
+_RE_NUMBERED = re.compile(r"^prompt_(\d+)$", re.IGNORECASE)
 
 
 def ensure_files(log=None):
-    """Создаёт недостающие файлы промптов со встроенным текстом."""
+    """Создаёт недостающие встроенные файлы промптов."""
     log = log or (lambda msg: None)
     try:
         os.makedirs(PROMPTS_DIR, exist_ok=True)
     except Exception as e:
         log("Не удалось создать папку промптов {0}: {1}".format(PROMPTS_DIR, e))
         return
-    for key in FILES:
-        path = _path(key)
+    for filename, text in BUILTIN.items():
+        path = os.path.join(PROMPTS_DIR, filename)
         if os.path.isfile(path):
             continue
         try:
             with open(path, "w", encoding="utf-8", newline="\n") as f:
-                f.write(DEFAULTS[key] + "\n")
+                f.write(text + "\n")
             log("Создан файл промпта: {0}".format(path))
         except Exception as e:
             log("Не удалось создать {0}: {1}".format(path, e))
 
 
-def load(key, log=None):
-    """Текст промпта по ключу ("context", "1", "2"). Пустой или
-    нечитаемый файл -> встроенный вариант."""
+def list_prompts(log=None):
+    """[(подпись, имя файла)] для выпадающего списка: все *.txt из папки
+    prompts/, кроме контекстного. prompt_N.txt -> «Промпт N» (по номеру),
+    остальные — по имени файла без расширения (по алфавиту, после
+    нумерованных)."""
+    ensure_files(log)
+    items = []
+    try:
+        names = os.listdir(PROMPTS_DIR)
+    except Exception:
+        names = []
+    for name in names:
+        if not name.lower().endswith(".txt") or name.lower() == CONTEXT_FILE:
+            continue
+        if not os.path.isfile(os.path.join(PROMPTS_DIR, name)):
+            continue
+        stem = name[:-4]
+        m = _RE_NUMBERED.match(stem)
+        if m:
+            items.append(((0, int(m.group(1)), ""), "Промпт {0}".format(int(m.group(1))), name))
+        else:
+            items.append(((1, 0, stem.lower()), stem, name))
+    items.sort(key=lambda it: it[0])
+    return [(label, name) for _key, label, name in items]
+
+
+def file_for_label(label):
+    """Имя файла по подписи из списка (если такой подписи уже нет —
+    встроенный «Промпт 1»)."""
+    for lab, name in list_prompts():
+        if lab == label:
+            return name
+    return DEFAULT_FILE
+
+
+def load_file(filename, log=None):
+    """Текст промпта из prompts/<filename>. Для встроенных файлов пустой
+    или нечитаемый файл -> встроенный текст; для остальных -> None (вызывающий
+    код должен сообщить об этом пользователю)."""
     log = log or (lambda msg: None)
     ensure_files(log)
+    path = os.path.join(PROMPTS_DIR, filename)
     try:
-        with open(_path(key), "r", encoding="utf-8-sig") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             text = f.read().strip()
     except Exception as e:
-        log("Не удалось прочитать {0}: {1} — беру встроенный промпт.".format(_path(key), e))
-        return DEFAULTS[key]
+        log("Не удалось прочитать {0}: {1}.".format(path, e))
+        return BUILTIN.get(filename)
     if not text:
-        log("Файл {0} пуст — беру встроенный промпт.".format(FILES[key]))
-        return DEFAULTS[key]
+        log("Файл {0} пуст.".format(filename))
+        return BUILTIN.get(filename)
     return text
 
 
-def key_for_label(label):
-    return LABELS.get(label, LABELS[DEFAULT_LABEL])
+def load_context(log=None):
+    return load_file(CONTEXT_FILE, log)

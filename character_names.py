@@ -421,3 +421,25 @@ def apply_character_names(game_dir, entries, use_translated, light_font_rel=None
             stats["changed"] += 1
 
     return stats
+
+
+def speaker_label_for_gender(who, names, player_gender="male"):
+    """Подпись говорящего для режима «Согласование по роду» (Gemma 4):
+    настоящее имя персонажа ("Aelira"), "Player (male)" для игрока
+    (динамическое имя из [..]) и None — когда имени нет (рассказчик,
+    либо код персонажа не найден среди define ... = Character(...)):
+    такая реплика уходит без имени, как строки old/new."""
+    who = (who or "").strip()
+    if not who:
+        return None
+    if who[0] in "\"'":
+        name = who[1:-1] if len(who) >= 2 and who[-1] == who[0] else who
+        return name or None
+    code = who.split()[0]
+    if code not in names:
+        return None
+    name = names[code]
+    if name == PLAYER_PLACEHOLDER:
+        return "{0} ({1})".format(PLAYER_PLACEHOLDER, player_gender)
+    return name
+
