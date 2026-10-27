@@ -33,6 +33,7 @@ import queue
 import re
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -121,6 +122,12 @@ ENGINE_DEFAULTS = {
 }
 
 
+def _libre_code(code):
+    """Код языка для LibreTranslate: у него китайский называется "zh", а не
+    "zh-CN", как в Google/DeepL и в списке языков окна."""
+    return {"zh-cn": "zh"}.get((code or "").lower(), code)
+
+
 class _GenerateResult:
     """Результат одного запуска renpy_sdk.generate_translations() —
     удобная обёртка, чтобы _generate_tl_worker мог организовать несколько
@@ -151,7 +158,9 @@ class App(tk.Tk):
         self.settings = project.load_settings(self.settings_path)
 
         self.clobber_var = tk.BooleanVar(value=False)
-        self.sdk_dir_var = tk.StringVar(value=self.settings.get("sdk_dir", ""))
+        # Строка под выбором папки игры: определённая версия Ren'Py и SDK
+        # (SDK берутся из папки "RenPy SDK" рядом с программой, см. renpy_sdk.py).
+        self.renpy_info_var = tk.StringVar(value="")
         self.lang_var = tk.StringVar()
         self.src_lang_var = tk.StringVar(value="Английский")
         self.dest_lang_var = tk.StringVar(value="Русский")
@@ -196,6 +205,8 @@ class App(tk.Tk):
         self.prompt_var = tk.StringVar(value=prompts.DEFAULT_LABEL)
         # «Согласование по роду» (экспериментально, только Gemma 4).
         self.gender_var = tk.BooleanVar(value=False)
+        # Игрок — женский персонаж (в запросе «Player (female)» вместо «Player (male)»).
+        self.player_female_var = tk.BooleanVar(value=False)
 
         self.log_queue = queue.Queue()
         self.worker_thread = None
@@ -241,16 +252,7 @@ class App(tk.Tk):
             command=self._start_prepare, state="disabled",
         )
         self.prepare_btn.pack(side="right")
-
-        # --- Папка SDK ---------------------------------------------------
-        frame_sdk = ttk.Frame(self)
-        frame_sdk.pack(fill="x", **pad)
-        ttk.Label(frame_sdk, text="Папка Ren'Py SDK (для автогенерации файлов перевода):").pack(anchor="w")
-        row_sdk = ttk.Frame(frame_sdk)
-        row_sdk.pack(fill="x", pady=(2, 0))
-        sdk_entry = ttk.Entry(row_sdk, textvariable=self.sdk_dir_var)
-        sdk_entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(row_sdk, text="Обзор...", command=self._choose_sdk_dir).pack(side="left", padx=(6, 0))
+        ttk.Label(frame_top, textvariable=self.renpy_info_var).pack(anchor="w", pady=(4, 0))
 
         # --- Переводчик + ключ DeepL + LibreTranslate --------------------
         frame_engine = ttk.Frame(self)
@@ -398,8 +400,15 @@ class App(tk.Tk):
         self.gender_check = ttk.Checkbutton(
             group_translate, text="Согласование по роду (экспериментально)",
             variable=self.gender_var, state="disabled",
+            command=self._update_gender_widgets,
         )
-        self.gender_check.grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
+        self.gender_check.grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 2))
+        # Доступна только вместе с «Согласованием по роду».
+        self.player_female_check = ttk.Checkbutton(
+            group_translate, text="Player — female (игрок — женский персонаж)",
+            variable=self.player_female_var, state="disabled",
+        )
+        self.player_female_check.grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
 
         ttk.Label(group_lang, text="Имя языка:").grid(row=0, column=0, sticky="w", **gt_pad)
         ttk.Label(group_lang, text="Папка перевода:").grid(row=0, column=1, sticky="w", **gt_pad)
@@ -560,14 +569,6 @@ class App(tk.Tk):
         self.project_path.set(path)
         self._refresh_project_dirs(show_warnings=True)
 
-    def _choose_sdk_dir(self):
-        path = filedialog.askdirectory(title="Выберите папку Ren'Py SDK")
-        if not path:
-            return
-        self.sdk_dir_var.set(path)
-        self.settings["sdk_dir"] = path
-        project.save_settings(self.settings_path, self.settings)
-
     def _choose_gemma_llama_folder(self):
         path = filedialog.askdirectory(
             title="Выберите папку llama.cpp (там, где лежит llama-server.exe)"
@@ -686,6 +687,7 @@ class App(tk.Tk):
         создали эти файлы)."""
         path = self.project_path.get()
         self.game_dir = project.find_game_dir(path)
+        self._update_renpy_info()
         self.prepare_btn.configure(state="normal" if self.game_dir else "disabled")
         self.generate_tl_btn.configure(state="normal" if self.game_dir else "disabled")
         self.update_fonts_btn.configure(state="normal" if self.game_dir else "disabled")
@@ -823,7 +825,7 @@ class App(tk.Tk):
         # Translate Gemma он подменяет промпт для строк меню/интерфейса
         # (old/new), диалоги идут с контекстным промптом; у Gemma 4 —
         # промпт для всех строк.
-        self.gender_check.configure(state="normal" if show_gemma4 else "disabled")
+        self._update_gender_widgets()
         show_prompt = show_gemma or show_gemma4
         for w in (self.prompt_label, self.prompt_combo):
             w.grid() if show_prompt else w.grid_remove()
@@ -1001,11 +1003,12 @@ class App(tk.Tk):
         if self.prompt_var.get() not in labels:
             self.prompt_var.set(labels[0] if labels else prompts.DEFAULT_LABEL)
 
-    def _load_selected_prompt(self):
-        """(имя файла, текст) выбранного промпта. Если файл пуст или не
-        читается — показывает ошибку и возвращает (файл, None)."""
+    def _load_selected_prompt(self, src_code=None, dest_code=None):
+        """(имя файла, текст) выбранного промпта, с языками из окна,
+        подставленными вместо {SRC_LANG}/{DEST_LANG}. Если файл пуст или
+        не читается — показывает ошибку и возвращает (файл, None)."""
         filename = prompts.file_for_label(self.prompt_var.get())
-        text = prompts.load_file(filename, log=self._log)
+        text = prompts.load_file(filename, log=self._log, src_lang=src_code, dest_lang=dest_code)
         if text is None:
             messagebox.showerror(
                 "Пустой промпт",
@@ -1083,8 +1086,8 @@ class App(tk.Tk):
                 return
             gemma_url = self.gemma_url_var.get().strip() or translate_gemma.DEFAULT_URL
 
-            ctx_prompt = prompts.load_context(log=self._log)
-            _no_ctx_file, no_ctx_prompt = self._load_selected_prompt()
+            ctx_prompt = prompts.load_context(log=self._log, src_lang=src_code, dest_lang=dest_code)
+            _no_ctx_file, no_ctx_prompt = self._load_selected_prompt(src_code, dest_code)
             if no_ctx_prompt is None:
                 return
 
@@ -1117,19 +1120,22 @@ class App(tk.Tk):
                 messagebox.showerror("Неверное значение", str(e))
                 return
             gender_mode = bool(self.gender_var.get())
-            prompt_file, prompt_text = self._load_selected_prompt()
+            player_female = gender_mode and bool(self.player_female_var.get())
+            prompt_file, prompt_text = self._load_selected_prompt(src_code, dest_code)
             if prompt_text is None:
                 return
             if gender_mode:
                 self._log(
-                    "Режим «Согласование по роду»: строки уходят как «Имя: текст», "
-                    "используется выбранный промпт ({0}) — он должен объяснять "
-                    "модели этот формат.".format(prompt_file)
+                    "Режим «Согласование по роду»: строки уходят как «Имя: текст» "
+                    "(имя нужно модели для определения пола говорящего). Игрок: {0}."
+                    .format("женский (Player (female))" if player_female
+                            else "мужской (Player (male))")
                 )
             gemma4_cfg = {
                 "url": self.gemma4_url_var.get().strip() or gemma4_translate.DEFAULT_URL,
                 "np": max(1, g4_np),
                 "gender": gender_mode,
+                "player_gender": "female" if player_female else "male",
                 "n_predict": g4_n,
                 "prompt": prompt_text,
                 # Свой кэш на каждый промпт (и на каждую правку его текста).
@@ -1327,19 +1333,114 @@ class App(tk.Tk):
         finally:
             self.log_queue.put("__PREPARE_DONE__")
 
+    def _update_gender_widgets(self):
+        """«Согласование по роду» доступно только для Gemma 4, «Player —
+        female» — только при включённом согласовании по роду."""
+        is_g4 = self._current_engine_key() == "gemma4"
+        self.gender_check.configure(state="normal" if is_g4 else "disabled")
+        self.player_female_check.configure(
+            state="normal" if (is_g4 and self.gender_var.get()) else "disabled")
+
+    # ------------------------------------------------------------------
+    # Версия Ren'Py игры и выбор SDK
+    # ------------------------------------------------------------------
+    def _update_renpy_info(self):
+        """Строка под выбором папки игры: версия Ren'Py и какой SDK будет
+        использован."""
+        path = self.project_path.get().strip()
+        if not path:
+            self.renpy_info_var.set("")
+            return
+        version, _source = renpy_sdk.detect_game_version(path)
+        if not version:
+            self.renpy_info_var.set(
+                "Версия Ren'Py игры: не определена (при генерации файлов "
+                "перевода SDK нужно будет выбрать вручную)."
+            )
+            return
+        installed = renpy_sdk.list_installed_sdks(renpy_sdk.sdk_base_dir(self.script_dir))
+        sdk = renpy_sdk.pick_sdk(installed, version[0])
+        text = "Версия Ren'Py игры: {0}".format(".".join(str(n) for n in version))
+        if sdk:
+            text += "  →  SDK: {0}".format(sdk["name"])
+        else:
+            text += "  →  подходящего SDK нет в папке «{0}»".format(renpy_sdk.SDK_BASE_FOLDER_NAME)
+        self.renpy_info_var.set(text)
+
+    def _resolve_sdk_dir(self):
+        """Выбирает SDK для генерации файлов перевода: по версии игры
+        (script_version.txt), а если определить версию или найти подходящий
+        SDK не удалось — предупреждает и даёт выбрать вручную. Возвращает
+        (папка_SDK, строка_для_журнала) либо (None, None) — тогда
+        генерацию нужно отменить (сообщение пользователю уже показано)."""
+        base = renpy_sdk.sdk_base_dir(self.script_dir)
+        installed = renpy_sdk.list_installed_sdks(base)
+        if not installed:
+            messagebox.showerror(
+                "Не найден Ren'Py SDK",
+                "В папке\n{0}\nне найдено ни одного Ren'Py SDK. Положите туда "
+                "распакованные SDK, например:\n{0}\\renpy-8.5.3-sdk\n"
+                "{0}\\renpy-7.8.7-sdk".format(base),
+            )
+            return None, None
+
+        version, source = renpy_sdk.detect_game_version(self.project_path.get())
+        if version:
+            ver_text = ".".join(str(n) for n in version)
+            sdk = renpy_sdk.pick_sdk(installed, version[0])
+            if sdk:
+                return sdk["path"], (
+                    "Версия Ren'Py игры: {0} (по файлу {1}) — использую SDK {2}."
+                    .format(ver_text, source, sdk["name"])
+                )
+            reason = (
+                "Игра сделана на Ren'Py {0}, но в папке «{1}» нет подходящего "
+                "SDK (нужен SDK версии {2}).".format(
+                    ver_text, renpy_sdk.SDK_BASE_FOLDER_NAME,
+                    "8 или новее" if version[0] >= 8 else str(max(version[0], 6)))
+            )
+        else:
+            reason = "Не удалось автоматически определить версию Ren'Py этой игры."
+
+        chosen = self._ask_sdk_manually(installed, reason)
+        if not chosen:
+            return None, None
+        return chosen["path"], "SDK выбран вручную: {0}.".format(chosen["name"])
+
+    def _ask_sdk_manually(self, installed, reason):
+        """Модальное окно ручного выбора SDK (по одной кнопке на каждую
+        установленную мажорную версию). Возвращает выбранный SDK
+        (dict из renpy_sdk.list_installed_sdks) или None при отмене."""
+        result = {"sdk": None}
+        dlg = tk.Toplevel(self)
+        dlg.title("Выбор версии Ren'Py SDK")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        ttk.Label(
+            dlg, justify="left", wraplength=440,
+            text=reason + "\n\nВыберите, каким SDK сгенерировать файлы перевода:",
+        ).pack(padx=16, pady=(14, 8), anchor="w")
+
+        def choose(sdk):
+            result["sdk"] = sdk
+            dlg.destroy()
+
+        for sdk in renpy_sdk.best_per_major(installed):
+            ttk.Button(
+                dlg, text="Ren'Py {0}  ({1})".format(sdk["version"][0], sdk["name"]),
+                command=lambda s=sdk: choose(s),
+            ).pack(fill="x", padx=16, pady=3)
+        ttk.Button(dlg, text="Отмена", command=dlg.destroy).pack(fill="x", padx=16, pady=(8, 14))
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        dlg.update_idletasks()
+        dlg.grab_set()
+        self.wait_window(dlg)
+        return result["sdk"]
+
     def _generate_tl_files(self):
         if not self.game_dir:
             messagebox.showerror("Ошибка", "Сначала выберите папку игры.")
             return
-        sdk_dir = self.sdk_dir_var.get().strip()
-        if not sdk_dir:
-            messagebox.showerror(
-                "Нужна папка SDK",
-                "Укажите папку Ren'Py SDK (там же, где renpy.exe / renpy.sh) "
-                "в поле выше.",
-            )
-            return
-
         renpy_lang = self.renpy_lang_var.get().strip()
         if not renpy_lang:
             messagebox.showerror(
@@ -1349,8 +1450,10 @@ class App(tk.Tk):
             )
             return
 
-        self.settings["sdk_dir"] = sdk_dir
-        project.save_settings(self.settings_path, self.settings)
+        # SDK выбирается по версии игры (при неудаче — вручную, в окне).
+        sdk_dir, sdk_info = self._resolve_sdk_dir()
+        if not sdk_dir:
+            return
 
         self.prepare_btn.configure(state="disabled")
         self.generate_tl_btn.configure(state="disabled")
@@ -1358,6 +1461,7 @@ class App(tk.Tk):
         self.start_btn.configure(state="disabled")
         self.log_text.delete("1.0", "end")
         self.status_var.set("Генерирую файлы перевода через Ren'Py SDK...")
+        self._log(sdk_info)
         threading.Thread(
             target=self._generate_tl_worker, args=(sdk_dir, renpy_lang), daemon=True,
         ).start()
@@ -1733,9 +1837,30 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Фоновый поток перевода
     # ------------------------------------------------------------------
-    def _worker(self, lang_dir, files, src_code, dest_code, overwrite, use_cache,
-                engine, api_key, libre_url, libre_key, batch_items=None,
-                batch_delay=None, gemma4_cfg=None):
+    def _worker(self, *args, **kwargs):
+        """Обёртка над _worker_impl: что бы ни случилось внутри (в том числе
+        неожиданное исключение), ошибка попадёт в журнал со всеми подробностями,
+        уже переведённое сохранится в кэш, а кнопки окна разблокируются."""
+        self._cache_ctx = None
+        try:
+            self._worker_impl(*args, **kwargs)
+        except Exception:
+            self._log("")
+            self._log(
+                "НЕОЖИДАННАЯ ОШИБКА в работе переводчика — перевод остановлен. "
+                "Подробности (пришлите их, если ошибка повторяется):\n{0}"
+                .format(traceback.format_exc())
+            )
+            ctx = self._cache_ctx
+            if ctx:
+                project.save_cache(*ctx)
+                self._log("Уже переведённые строки сохранены в кэш.")
+        finally:
+            self.log_queue.put("__DONE__")
+
+    def _worker_impl(self, lang_dir, files, src_code, dest_code, overwrite, use_cache,
+                     engine, api_key, libre_url, libre_key, batch_items=None,
+                     batch_delay=None, gemma4_cfg=None):
         cache_names = {
             "google": project.CACHE_FILENAME,
             "deepl": project.CACHE_FILENAME_DEEPL,
@@ -1751,6 +1876,9 @@ class App(tk.Tk):
         }
         cache_name = cache_names[engine]
         cache = project.load_cache(lang_dir, cache_name) if use_cache else {}
+        # Нужен обёртке _worker: если поток упадёт с неожиданной ошибкой,
+        # уже переведённое всё равно сохранится в кэш.
+        self._cache_ctx = (lang_dir, cache, cache_name) if use_cache else None
 
         # Периодически сохраняем кэш во время работы, чтобы при остановке
         # посреди большого файла переведённые строки не терялись.
@@ -1779,7 +1907,7 @@ class App(tk.Tk):
             )
         elif engine == "libretranslate":
             translator = libretranslate_translate.LibreTranslator(
-                base_url=libre_url, src=src_code, dest=dest_code,
+                base_url=libre_url, src=_libre_code(src_code), dest=_libre_code(dest_code),
                 api_key=(libre_key or None), cache=cache,
                 log=self._log, on_progress=on_progress,
                 delay=batch_delay, batch_items=batch_items,
@@ -1813,8 +1941,9 @@ class App(tk.Tk):
         total_stats = {"translated": 0, "skipped": 0, "failed": 0, "nothing_to_translate": 0}
 
         # Строки, правленные вручную в «Редакторе переводов», не
-        # перезаписываются никогда (даже при галочке «Перезаписывать...»).
-        manual = editor_store.load_manual(lang_dir)
+        # перезаписываются никогда (даже при галочке «Перезаписывать...»);
+        # то же для строк, отмеченных «Перевод не требуется».
+        manual = editor_store.load_protected(lang_dir)
 
         def protected_for(path):
             return manual.get(editor_store.rel_of(lang_dir, path))
@@ -1841,7 +1970,9 @@ class App(tk.Tk):
                         translator.add_known_prefix(e["old"], e["new"])
             except Exception as e:
                 self._log("  Не удалось прочитать файл имён: {0}".format(e))
-            resolve_fn = lambda who: character_names.speaker_label_for_gender(who, names)
+            _player_gender = gemma4_cfg.get("player_gender", "male")
+            resolve_fn = lambda who: character_names.speaker_label_for_gender(
+                who, names, _player_gender)
 
         # --- Фаза 1: читаем все файлы и собираем уникальные строки,
         # которые нужно перевести, чтобы перевести их пачками (несколько
@@ -2001,14 +2132,30 @@ class App(tk.Tk):
             "автопереводы — машинный перевод не идеален, особенно для имён, "
             "шуток и игровых терминов."
         )
-        self.log_queue.put("__DONE__")
 
     # ------------------------------------------------------------------
     # Фоновый поток перевода — Translate Gemma (контекстный, по файлам
     # параллельно, без общего кэша — см. обсуждение в handoff-документе)
     # ------------------------------------------------------------------
-    def _worker_gemma(self, lang_dir, files, overwrite, gemma_url, gemma_np, n_predict,
-                      context_prompt=None, no_context_prompt=None):
+    def _worker_gemma(self, *args, **kwargs):
+        """Обёртка над _worker_gemma_impl — то же, что _worker: ошибка
+        попадает в журнал, кнопки разблокируются при любом исходе."""
+        try:
+            self._worker_gemma_impl(*args, **kwargs)
+        except Exception:
+            if self._gemma_stop_event is not None:
+                self._gemma_stop_event.set()
+            self._log("")
+            self._log(
+                "НЕОЖИДАННАЯ ОШИБКА в работе переводчика — перевод остановлен. "
+                "Подробности (пришлите их, если ошибка повторяется):\n{0}"
+                .format(traceback.format_exc())
+            )
+        finally:
+            self.log_queue.put("__DONE__")
+
+    def _worker_gemma_impl(self, lang_dir, files, overwrite, gemma_url, gemma_np, n_predict,
+                           context_prompt=None, no_context_prompt=None):
         self._gemma_stop_event = threading.Event()
 
         # --- Словарь "код персонажа -> настоящее имя" собирается ОДИН
@@ -2044,7 +2191,7 @@ class App(tk.Tk):
         # тем же правилам, по которым потом идёт сам перевод
         # (core.count_pending), поэтому число совпадает с реальным
         # количеством обращений к модели. -------------------------------
-        manual = editor_store.load_manual(lang_dir)
+        manual = editor_store.load_protected(lang_dir)
 
         def protected_for(path):
             return manual.get(editor_store.rel_of(lang_dir, path))
@@ -2158,7 +2305,6 @@ class App(tk.Tk):
             "автопереводы — машинный перевод не идеален, особенно для имён, "
             "шуток и игровых терминов."
         )
-        self.log_queue.put("__DONE__")
 
 
 def main():
