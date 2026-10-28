@@ -86,9 +86,11 @@ class Gemma4ConnectionError(Gemma4Error):
     """Сервер недоступен вообще — повторять остальные строки бессмысленно."""
 
 
-def raw_translate(base_url, system_prompt, text, max_tokens=DEFAULT_N_PREDICT, timeout=600):
+def raw_translate(base_url, system_prompt, text, max_tokens=DEFAULT_N_PREDICT, timeout=600,
+                  return_info=False):
     """Один запрос к /v1/chat/completions: system = промпт, user = голый
-    текст строки (как в тестовом скрипте)."""
+    текст строки (как в тестовом скрипте). С return_info=True возвращает
+    (текст, info) — см. translate_gemma.raw_translate()."""
     url = base_url.rstrip("/") + "/v1/chat/completions"
     payload = {
         "messages": [
@@ -121,9 +123,17 @@ def raw_translate(base_url, system_prompt, text, max_tokens=DEFAULT_N_PREDICT, t
         )
     try:
         data = json.loads(raw)
-        return data["choices"][0]["message"]["content"].strip()
+        text_out = data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         raise Gemma4Error("Неожиданный ответ сервера: {0}".format(e))
+    if not return_info:
+        return text_out
+    info = {
+        "completion_tokens": (data.get("usage") or {}).get("completion_tokens"),
+        "predicted_per_second": (data.get("timings") or {}).get("predicted_per_second"),
+        "finish_reason": data["choices"][0].get("finish_reason"),
+    }
+    return text_out, info
 
 
 class Gemma4Translator:

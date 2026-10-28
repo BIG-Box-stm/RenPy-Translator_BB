@@ -28,9 +28,26 @@ import re
 
 import character_names
 import core
+import gemma4_translate
 import project
 
 MANUAL_FILENAME = "_manual_edits.json"
+
+# «Система»: файлы перевода со служебными строками интерфейса (меню, Save/
+# Load/Quit и т.п.). Сравнение — по имени файла, без учёта регистра и папок.
+SYSTEM_FILES = {"common.rpy", "screens.rpy", "gui.rpy", "options.rpy"}
+
+# Языки перевода с не-латинским письмом: там латиница в переводе — признак
+# непереведённого текста (для немецкого, французского и т.п. это норма).
+NON_LATIN_DEST = {"ru", "uk", "zh", "zh-cn", "zh-tw", "ja", "ko", "ar", "hi", "th"}
+
+# Пороги проверки «Подозрительные» (знаки препинания сознательно НЕ
+# сравниваются: запятые, тире и кавычки в переводе законно отличаются от
+# оригинала).
+LONGER_RATIO = 2.2      # перевод длиннее оригинала более чем во столько раз
+SHORTER_RATIO = 0.3     # ...или короче менее чем во столько раз
+MIN_LEN_FOR_RATIO = 25  # на более коротких строках длину не сравниваем
+LATIN_SHARE = 0.5       # доля латинских букв (вне тегов), выше которой перевод подозрителен
 
 
 def list_files(lang_dir):
@@ -45,6 +62,14 @@ def list_files(lang_dir):
 
 def rel_of(lang_dir, path):
     return os.path.relpath(path, lang_dir).replace(os.sep, "/")
+
+
+def is_system_rel(rel):
+    return os.path.basename(rel).lower() in SYSTEM_FILES
+
+
+def is_names_rel(rel):
+    return os.path.basename(rel) == character_names.NAMES_FILENAME
 
 
 def display_path(lang_folder, rel):
@@ -113,16 +138,72 @@ def load_protected(lang_dir):
 # Строки
 # ---------------------------------------------------------------------------
 
-def scan(lang_dir, manual=None, skip=None):
+def suspicious_reasons(orig, cur, speaker=None, known=None, dest_code=None):
+    """Список причин, по которым готовый перевод выглядит подозрительно
+    (пустой список — всё в порядке). Проверяются: теги/подстановки/\\n
+    (core.tag_problems), оставшийся обрывок промпта, «Имя:» говорящего в
+    начале перевода, перевод почти целиком латиницей (только для языков с
+    не-латинским письмом), перевод сильно длиннее или короче оригинала."""
+    cur_s = cur.strip()
+    if not cur_s or cur == orig:
+        return []     # непереведённые строки живут в фильтре «Не переведённые»
+    reasons = []
+    problems = core.tag_problems(orig, cur)
+    if problems:
+        reasons.append("теги/подстановки: " + "; ".join(problems))
+    if any(m in cur for m in ("[CURRENT_SOURCE]", "[PREVIOUS_SOURCE]", "[PREVIOUS_TRANSLATION]")):
+        reasons.append("в переводе остался обрывок промпта")
+    stripped, learned = gemma4_translate.split_speaker(cur, speaker, orig, known) if speaker else (cur, None)
+    if learned:
+        reasons.append("в начале осталось имя говорящего («{0}:»)".format(learned))
+    elif not speaker and ":" not in orig and "：" not in orig:
+        if gemma4_translate._RE_NAME_PREFIX.match(cur):
+            reasons.append("возможно, в начале осталось имя говорящего")
+    if (dest_code or "").lower() in NON_LATIN_DEST:
+        text = core._RE_PROTECT.sub(" ", cur)
+        latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+        letters = sum(1 for ch in text if ch.isalpha())
+        if letters >= 4 and latin / letters > LATIN_SHARE:
+            reasons.append("почти весь перевод латиницей — возможно, не переведено")
+    if len(orig) >= MIN_LEN_FOR_RATIO:
+        if len(cur) > LONGER_RATIO * len(orig):
+            reasons.append("перевод намного длиннее оригинала")
+        elif len(cur) < SHORTER_RATIO * len(orig):
+            reasons.append("перевод намного короче оригинала (обрыв?)")
+    return reasons
+
+
+def scan(lang_dir, manual=None, skip=None, dest_code=None):
     """Все переводимые строки языковой папки. Элемент списка — dict:
-    rel, key, kind ('old_new'/'dialogue'), orig (текст внутри кавычек, как
-    в файле), cur (текущий перевод, как в файле), untranslated (перевода
-    нет: пусто либо совпадает с оригиналом, и строка не защищена),
-    manual (правлена вручную), skip (отмечена «перевод не требуется»)."""
+    rel, key, kind ('old_new'/'dialogue'), who (имя говорящего для
+    диалогов, иначе ""), orig (текст внутри кавычек, как в файле), cur
+    (текущий перевод, как в файле), untranslated (перевода нет: пусто либо
+    совпадает с оригиналом, и строка не защищена), manual (правлена
+    вручную), skip (отмечена «перевод не требуется»), suspicious (список
+    причин, см. suspicious_reasons(); для ручных и отмеченных строк пуст),
+    note (те же причины одной строкой)."""
     if manual is None or skip is None:
         file_manual_all, file_skip_all = _read_raw(lang_dir)
         manual = file_manual_all if manual is None else manual
         skip = file_skip_all if skip is None else skip
+
+    # Имена персонажей: lang_dir = <игра>/game/tl/<язык>.
+    game_dir = os.path.dirname(os.path.dirname(os.path.normpath(lang_dir)))
+    names = {}
+    try:
+        if os.path.isdir(game_dir):
+            names = character_names.scan_character_names(game_dir)
+    except Exception:
+        names = {}
+    known_map = {}
+    try:
+        for e in character_names.parse_names_file(
+                os.path.join(lang_dir, character_names.NAMES_FILENAME)):
+            if e["new"] and e["new"] != e["old"]:
+                known_map.setdefault(e["old"], set()).add(e["new"])
+    except Exception:
+        pass
+
     rows = []
     for path in list_files(lang_dir):
         rel = rel_of(lang_dir, path)
@@ -136,15 +217,28 @@ def scan(lang_dir, manual=None, skip=None):
         for entry in core.find_translatable(lines):
             if not core.needs_translation(entry['orig_quoted']):
                 continue
+            is_dialogue = entry['type'] == 'dialogue'
+            who_name = character_names.resolve_speaker_name(entry['who'], names) if is_dialogue else ""
+            speaker = character_names.speaker_label_for_gender(entry['who'], names) if is_dialogue else None
+            orig = entry['orig_quoted'][1:-1]
+            cur = entry['current_inner']
+            is_protected = entry['key'] in protected
+            reasons = [] if is_protected else suspicious_reasons(
+                orig, cur, speaker=speaker,
+                known=(known_map.get(speaker.split(" (")[0]) if speaker else None),
+                dest_code=dest_code)
             rows.append({
                 "rel": rel,
                 "key": entry['key'],
                 "kind": entry['type'],
-                "orig": entry['orig_quoted'][1:-1],
-                "cur": entry['current_inner'],
+                "who": who_name,
+                "orig": orig,
+                "cur": cur,
                 "untranslated": core._is_untranslated(entry, False, protected),
                 "manual": entry['key'] in file_manual,
                 "skip": entry['key'] in file_skip,
+                "suspicious": reasons,
+                "note": "; ".join(reasons),
             })
     return rows
 

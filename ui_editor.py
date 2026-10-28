@@ -7,6 +7,14 @@
 записывается в файл игры, строка получает защиту от перезаписи при
 следующем автопереводе и пропадает из списка «Не переведённые».
 
+Фильтр «Показать»: «Не переведённые», «Все строки», «Правленные вручную»,
+«Перевод не требуется», «Подозрительные» (готовые переводы, в которых
+программа заметила возможную проблему — причина в последнем столбце),
+«Имена» (файл имён персонажей) и «Система» (файлы common.rpy, screens.rpy,
+gui.rpy, options.rpy: меню, Save/Load/Quit и т.п.). Столбец «Говорящий» —
+кто произносит реплику. «Отмена последней правки» откатывает ещё не
+применённые изменения по одному шагу.
+
 Строки, которым перевод не нужен (например, просто "60" или
 "{color=#f00}[item.name]{/color}"), можно выделить (несколько сразу —
 Ctrl/Shift) и нажать «Перевод не требуется» (или правый щелчок): текст
@@ -23,7 +31,8 @@ import core
 import editor_store
 
 MAX_ROWS = 3000
-FILTERS = ["Не переведённые", "Все строки", "Правленные вручную", "Перевод не требуется"]
+FILTERS = ["Не переведённые", "Все строки", "Правленные вручную", "Перевод не требуется",
+           "Подозрительные", "Имена", "Система"]
 ALL_FILES = "Все файлы"
 
 
@@ -39,12 +48,14 @@ def _group(pairs):
 
 
 class EditorWindow(tk.Toplevel):
-    def __init__(self, master, lang_dir, lang_folder, log=None):
+    def __init__(self, master, lang_dir, lang_folder, log=None, dest_code=None):
         super().__init__(master)
         self.title("Редактор переводов")
-        self.geometry("1150x650")
+        self.geometry("1300x650")
         self.lang_dir = lang_dir
         self.lang_folder = lang_folder
+        self.dest_code = dest_code     # язык перевода (для проверки «Подозрительные»)
+        self.history = []              # снимки (edits, skips, unskips) для отмены
         self.log = log or (lambda msg: None)
         self.edits = {}        # (rel, key) -> новый текст (внутри кавычек)
         self.skips = set()     # (rel, key) — отметить «перевод не требуется» (ещё не применено)
@@ -61,7 +72,7 @@ class EditorWindow(tk.Toplevel):
         top.pack(fill="x", padx=8, pady=(8, 2))
         ttk.Label(top, text="Показать:").pack(side="left")
         ttk.Combobox(top, textvariable=self.filter_var, values=FILTERS,
-                     state="readonly", width=20).pack(side="left", padx=6)
+                     state="readonly", width=22).pack(side="left", padx=6)
         ttk.Label(top, text="Файл:").pack(side="left", padx=(12, 0))
         self.file_combo = ttk.Combobox(top, textvariable=self.file_var, values=[ALL_FILES],
                                        state="readonly", width=40)
@@ -77,17 +88,20 @@ class EditorWindow(tk.Toplevel):
         bar2.pack(fill="x", padx=8, pady=(0, 2))
         ttk.Button(bar2, text="Перевод не требуется", command=self.mark_skip_selected).pack(side="left")
         ttk.Button(bar2, text="Снять отметку", command=self.unmark_selected).pack(side="left", padx=(8, 0))
+        ttk.Button(bar2, text="Отмена последней правки", command=self.undo_last).pack(side="left", padx=(8, 0))
         ttk.Label(
             bar2,
             text="Выделите строки (можно несколько: Ctrl/Shift) — текст останется как в оригинале.",
         ).pack(side="left", padx=(12, 0))
 
-        cols = ("file", "src", "tr")
+        cols = ("file", "who", "src", "tr", "note")
         self.tree = ttk.Treeview(self, columns=cols, show="headings", selectmode="extended")
         for c, title, w, stretch in (
-            ("file", "Файл", 260, False),
-            ("src", "Оригинал строки", 420, True),
-            ("tr", "Перевод (двойной щелчок — править)", 420, True),
+            ("file", "Файл", 200, False),
+            ("who", "Говорящий", 100, False),
+            ("src", "Оригинал строки", 360, True),
+            ("tr", "Перевод (двойной щелчок — править)", 360, True),
+            ("note", "Замечание", 200, False),
         ):
             self.tree.heading(c, text=title)
             self.tree.column(c, width=w, anchor="w", stretch=stretch)
@@ -109,7 +123,7 @@ class EditorWindow(tk.Toplevel):
 
     # ---- данные ---------------------------------------------------------
     def reload(self):
-        self.rows = editor_store.scan(self.lang_dir)
+        self.rows = editor_store.scan(self.lang_dir, dest_code=self.dest_code)
         files = sorted({r["rel"] for r in self.rows})
         self.file_combo.configure(values=[ALL_FILES] + [
             editor_store.display_path(self.lang_folder, f) for f in files])
@@ -143,6 +157,13 @@ class EditorWindow(tk.Toplevel):
         if mode == "Правленные вручную" and not ((row["manual"] and k not in self.skips) or edited):
             return False
         if mode == "Перевод не требуется" and not skip:
+            return False
+        if mode == "Подозрительные" and not (row["suspicious"] and not edited and not skip
+                                              and k not in self.skips):
+            return False
+        if mode == "Имена" and not editor_store.is_names_rel(row["rel"]):
+            return False
+        if mode == "Система" and not editor_store.is_system_rel(row["rel"]):
             return False
         if only_file != ALL_FILES and editor_store.display_path(self.lang_folder, row["rel"]) != only_file:
             return False
@@ -181,8 +202,10 @@ class EditorWindow(tk.Toplevel):
     def values_of(self, row):
         return (
             editor_store.display_path(self.lang_folder, row["rel"]),
+            row["who"],
             row["orig"],
             self.shown_translation(row),
+            "" if (_kof(row) in self.edits or _kof(row) in self.skips) else row["note"],
         )
 
     def tags_of(self, row):
@@ -194,13 +217,13 @@ class EditorWindow(tk.Toplevel):
 
     # ---- правка ---------------------------------------------------------
     def on_double(self, event):
-        if self.tree.identify_column(event.x) != "#3":
+        if self.tree.identify_column(event.x) != "#4":
             return
         iid = self.tree.identify_row(event.y)
         if iid not in self.iid_row:
             return
         row = self.iid_row[iid]
-        x, y, w, h = self.tree.bbox(iid, "#3")
+        x, y, w, h = self.tree.bbox(iid, "#4")
         var = tk.StringVar(value=self.shown_translation(row))
         ent = ttk.Entry(self.tree, textvariable=var)
         ent.place(x=x, y=y, width=w, height=h)
@@ -225,6 +248,7 @@ class EditorWindow(tk.Toplevel):
             ):
                 return
             k = _kof(row)
+            self.push_history()
             self.edits[k] = inner
             # Правка отменяет отметку «перевод не требуется» (и ещё не
             # применённую, и уже сохранённую).
@@ -266,6 +290,7 @@ class EditorWindow(tk.Toplevel):
             "в файл будет записан оригинал. Продолжить?".format(len(replaced)),
         ):
             return
+        self.push_history()
         for row in rows:
             k = _kof(row)
             self.edits.pop(k, None)
@@ -279,11 +304,27 @@ class EditorWindow(tk.Toplevel):
         if not rows:
             messagebox.showinfo("Редактор переводов", "Сначала выделите одну или несколько строк.")
             return
+        self.push_history()
         for row in rows:
             k = _kof(row)
             self.skips.discard(k)
             if row["skip"]:
                 self.unskips.add(k)
+        self.refresh_keep_scroll()
+
+    # ---- отмена последней правки ------------------------------------------
+    def push_history(self):
+        """Запоминает состояние ещё не применённых изменений — перед
+        каждым новым действием (правка, отметка, снятие отметки)."""
+        self.history.append((dict(self.edits), set(self.skips), set(self.unskips)))
+
+    def undo_last(self):
+        if not self.history:
+            messagebox.showinfo(
+                "Редактор переводов",
+                "Нечего отменять: отменяются только ещё не применённые правки.")
+            return
+        self.edits, self.skips, self.unskips = self.history.pop()
         self.refresh_keep_scroll()
 
     def update_info(self):
@@ -315,6 +356,7 @@ class EditorWindow(tk.Toplevel):
         self.edits = {}
         self.skips = set()
         self.unskips = set()
+        self.history = []     # применённое откатить кнопкой нельзя
         self.reload()
         parts = []
         if n_edit:

@@ -38,6 +38,19 @@ def _deepl_lang(code):
     return mapped if mapped else code.upper()
 
 
+# Языки, которые DeepL API понимает (и как исходные, и как целевые), по
+# официальной документации. Хинди и вьетнамского в нём нет.
+SUPPORTED_LANGS = {
+    "ar", "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hu",
+    "id", "it", "ja", "ko", "lt", "lv", "nb", "nl", "pl", "pt", "ro", "ru",
+    "sk", "sl", "sv", "tr", "uk", "zh", "zh-cn", "zh-tw",
+}
+
+
+def is_language_supported(code):
+    return (code or "").strip().lower() in SUPPORTED_LANGS
+
+
 class RateLimited(Exception):
     def __init__(self, retry_after=None):
         super().__init__("DeepL: too many requests")

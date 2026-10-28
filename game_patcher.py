@@ -22,6 +22,8 @@
 import os
 import re
 import shutil
+import time
+import zipfile
 
 # Раньше шрифты были зашиты жёстко (4_LXGWWenKaiTC-Regular/-Bold) — теперь
 # программа сама находит нужную пару файлов по универсальному суффиксу
@@ -118,6 +120,10 @@ LANGUAGE_NAMES = {
     "es": "Spanish",
     "zh": "Chinese",
     "en": "English",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "id": "Indonesian",
+    "vi": "Vietnamese",
 }
 
 # Результаты правки текста файла.
@@ -410,6 +416,85 @@ def find_game_file(game_dir, filename):
     return matches[0]
 
 
+BACKUP_ZIP_NAME = "_translator_backup_gui_screens.zip"
+BACKUP_README_NAME = "_translator_backup_README.txt"
+
+
+def project_root_of(game_dir):
+    """Корень игры — папка, в которой лежит папка game."""
+    norm = os.path.normpath(game_dir)
+    return os.path.dirname(norm) if os.path.basename(norm).lower() == "game" else norm
+
+
+def backup_originals(game_dir, log=None):
+    """Перед первой правкой кладёт в КОРЕНЬ игры (не в game/) zip-архив с
+    исходными gui.rpy и screens.rpy — с сохранением вложенности папок
+    относительно корня (например game/scripts/GUI/screens.rpy) — и рядом
+    текстовый файл с объяснением, куда и как распаковать архив, чтобы всё
+    вернуть. Если архив уже есть, он НЕ перезаписывается: в нём остаются
+    самые первые, нетронутые оригиналы. Почему не просто копии .rpy.bak
+    внутри game/: Ren'Py читает все файлы .rpy в game/ и подпапках, и копия
+    с тем же содержимым дала бы ошибку двойных определений.
+    Возвращает 'created' / 'exists' / 'nothing' / 'error'."""
+    log = log or (lambda msg: None)
+    root = project_root_of(game_dir)
+    zip_path = os.path.join(root, BACKUP_ZIP_NAME)
+    if os.path.isfile(zip_path):
+        log("  Резервная копия уже есть ({0}) — не перезаписываю, в ней остаются "
+            "первоначальные файлы.".format(zip_path))
+        return "exists"
+
+    files = []
+    for name in ("gui.rpy", "screens.rpy"):
+        try:
+            path = find_game_file(game_dir, name)
+        except PatchTargetError as e:
+            log("  Резервная копия: {0}".format(e))
+            continue
+        if path:
+            files.append(path)
+    if not files:
+        log("  Резервная копия: gui.rpy и screens.rpy не найдены — копировать нечего.")
+        return "nothing"
+
+    try:
+        arc_names = []
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in files:
+                arc = os.path.relpath(path, root).replace(os.sep, "/")
+                zf.write(path, arc)
+                arc_names.append(arc)
+        readme = (
+            "Резервная копия файлов, которые изменила программа Universal RenPy "
+            "Translator\n"
+            "Создана: {when}\n\n"
+            "Архив: {zip_name} (лежит в корне игры)\n"
+            "Внутри (пути указаны от корня игры):\n{names}\n\n"
+            "Как вернуть файлы, если после правок что-то пошло не так:\n"
+            "1. Распакуйте архив {zip_name} ПРЯМО В ЭТУ ПАПКУ с заменой "
+            "существующих файлов:\n   {root}\n"
+            "   (пути внутри архива уже содержат папку game и вложенные папки, "
+            "файлы встанут на свои места).\n"
+            "2. Если рядом с этими файлами лежат одноимённые .rpyc "
+            "(gui.rpyc, screens.rpyc) — удалите их: Ren'Py пересоберёт их сам.\n\n"
+            "Архив создаётся один раз, до первой правки, и больше не "
+            "перезаписывается.\n"
+        ).format(
+            when=time.strftime("%Y-%m-%d %H:%M:%S"),
+            zip_name=BACKUP_ZIP_NAME,
+            names="\n".join("   " + n for n in arc_names),
+            root=root,
+        )
+        with open(os.path.join(root, BACKUP_README_NAME), "w", encoding="utf-8-sig") as f:
+            f.write(readme)
+    except Exception as e:
+        log("  ОШИБКА создания резервной копии: {0}".format(e))
+        return "error"
+    log("  Резервная копия создана: {0} (инструкция по откату: {1}).".format(
+        zip_path, BACKUP_README_NAME))
+    return "created"
+
+
 def apply_all(bundle_dir, game_dir, lang, log=None):
     """Выполняет все три шага. Пишет ход работы в log(msg). Возвращает
     словарь со статусом каждого шага: 'fonts', 'gui', 'screens' — одно
@@ -427,6 +512,10 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
         log(str(e))
         return result
     log("Найдена пара шрифтов: {0} / {1}.".format(regular_font, bold_font))
+
+    # --- 0б. резервная копия gui.rpy / screens.rpy (до любых правок) -----
+    log("Резервная копия gui.rpy и screens.rpy...")
+    backup_originals(game_dir, log=log)
 
     # --- 1. шрифты -----------------------------------------------------
     log("1/3. Копирую шрифты в папку игры...")

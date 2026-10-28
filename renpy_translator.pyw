@@ -77,14 +77,38 @@ LANGUAGES = [
     ("Японский", "ja"),
     ("Корейский", "ko"),
     ("Турецкий", "tr"),
+    ("Арабский", "ar"),
+    ("Хинди", "hi"),
+    ("Индонезийский", "id"),
+    ("Вьетнамский", "vi"),
 ]
 LANG_NAME_TO_CODE = dict(LANGUAGES)
 LANG_CODE_TO_NAME = {v: k for k, v in LANGUAGES}
 
+ENGINE_NAMES = [
+    "Google Translate (без ключа)",
+    "DeepL (нужен ключ API)",
+    "LibreTranslate (офлайн, локально)",
+    "Translate Gemma (офлайн)",
+    "Gemma 4 (офлайн)",
+]
+
+# Строка для кнопки «Проверить переводчик»: длинная намеренно — по ней видно,
+# что ответ не обрывается (слово "End" в конце) и что движок вообще отвечает.
+TEST_TEXT = (
+    "This is a long text string used to test the translator's settings. "
+    "If the text appears in your language and you see the word \"End\" (or a "
+    "synonym) at the end of this window, you can proceed with translating the "
+    "game—the translator has started correctly and is ready for use. If the "
+    "final word is missing, try increasing the \"Context window\" setting. "
+    "This ensures that game strings are translated fully without being cut "
+    "off. End."
+)
+
 # "Имя языка" (для Ren'Py SDK / кнопки шрифтов) — программа работает
 # только с этими языками, поэтому это закрытый список, а не свободный
 # ввод.
-RENPY_LANG_CODES = ["ru", "fr", "es", "zh", "en"]
+RENPY_LANG_CODES = ["ru", "fr", "es", "zh", "en", "ar", "hi", "id", "vi"]
 
 # Готовые варианты разделителя (маркера защиты тегов/подстановок).
 # core.DEFAULT_MARKER_TEMPLATE — текущий формат по умолчанию (третья
@@ -207,6 +231,12 @@ class App(tk.Tk):
         self.gender_var = tk.BooleanVar(value=False)
         # Игрок — женский персонаж (в запросе «Player (female)» вместо «Player (male)»).
         self.player_female_var = tk.BooleanVar(value=False)
+        # Сохранять ли ключи API (DeepL / Google / LibreTranslate) в файле
+        # настроек — в открытом виде.
+        self.remember_keys_var = tk.BooleanVar(value=False)
+        # Окно «Проверить переводчик»: номер запуска и (номер, окно, текстовое поле).
+        self._test_seq = 0
+        self._test_dialog = None
 
         self.log_queue = queue.Queue()
         self.worker_thread = None
@@ -220,7 +250,9 @@ class App(tk.Tk):
         self._eta_total = 0
 
         self._build_ui()
+        self._apply_saved_settings()
         self._on_engine_changed()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll_queue)
 
     # ------------------------------------------------------------------
@@ -260,13 +292,7 @@ class App(tk.Tk):
         ttk.Label(frame_engine, text="Переводчик:").grid(row=0, column=0, sticky="w")
         self.engine_combo = ttk.Combobox(
             frame_engine, textvariable=self.engine_var, state="readonly", width=30,
-            values=[
-                "Google Translate (без ключа)",
-                "DeepL (нужен ключ API)",
-                "LibreTranslate (офлайн, локально)",
-                "Translate Gemma (офлайн)",
-                "Gemma 4 (офлайн)",
-            ],
+            values=ENGINE_NAMES,
         )
         self.engine_combo.grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.engine_combo.bind("<<ComboboxSelected>>", self._on_engine_changed)
@@ -292,12 +318,12 @@ class App(tk.Tk):
         self.libre_url_entry.grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(2, 0))
 
         self.launch_libre_label = ttk.Label(frame_engine, text="Только для LibreTranslate:")
-        self.launch_libre_label.grid(row=0, column=3, sticky="w", padx=(16, 0))
+        self.launch_libre_label.grid(row=0, column=4, sticky="w", padx=(16, 0))
         self.launch_libre_btn = ttk.Button(
             frame_engine, text="Запустить LibreTranslate",
             command=self._start_launch_libretranslate,
         )
-        self.launch_libre_btn.grid(row=1, column=3, sticky="w", padx=(16, 0), pady=(2, 0))
+        self.launch_libre_btn.grid(row=1, column=4, sticky="w", padx=(16, 0), pady=(2, 0))
 
         self.gemma_url_label = ttk.Label(frame_engine, text="Адрес Translate Gemma:")
         self.gemma_url_label.grid(row=0, column=2, sticky="w", padx=(20, 0))
@@ -305,12 +331,12 @@ class App(tk.Tk):
         self.gemma_url_entry.grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(2, 0))
 
         self.gemma_launch_label = ttk.Label(frame_engine, text="Только для Translate Gemma:")
-        self.gemma_launch_label.grid(row=0, column=3, sticky="w", padx=(16, 0))
+        self.gemma_launch_label.grid(row=0, column=4, sticky="w", padx=(16, 0))
         self.launch_gemma_btn = ttk.Button(
             frame_engine, text="Запустить Translate Gemma",
             command=self._start_launch_gemma,
         )
-        self.launch_gemma_btn.grid(row=1, column=3, sticky="w", padx=(16, 0), pady=(2, 0))
+        self.launch_gemma_btn.grid(row=1, column=4, sticky="w", padx=(16, 0), pady=(2, 0))
 
         self.gemma4_url_label = ttk.Label(frame_engine, text="Адрес Gemma 4:")
         self.gemma4_url_label.grid(row=0, column=2, sticky="w", padx=(20, 0))
@@ -318,12 +344,24 @@ class App(tk.Tk):
         self.gemma4_url_entry.grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(2, 0))
 
         self.gemma4_launch_label = ttk.Label(frame_engine, text="Только для Gemma 4:")
-        self.gemma4_launch_label.grid(row=0, column=3, sticky="w", padx=(16, 0))
+        self.gemma4_launch_label.grid(row=0, column=4, sticky="w", padx=(16, 0))
         self.launch_gemma4_btn = ttk.Button(
             frame_engine, text="Запустить Gemma 4",
             command=self._start_launch_gemma4,
         )
-        self.launch_gemma4_btn.grid(row=1, column=3, sticky="w", padx=(16, 0), pady=(2, 0))
+        self.launch_gemma4_btn.grid(row=1, column=4, sticky="w", padx=(16, 0), pady=(2, 0))
+
+        # Проверка переводчика (для любого движка): ничего не запускает и не
+        # меняет, только отправляет тестовую строку и показывает ответ. У
+        # локальных движков стоит левее кнопки «Запустить...», у онлайновых —
+        # левее галочки «Запомнить ключ» (см. _on_engine_changed).
+        self.test_label = ttk.Label(frame_engine, text="Проверка:")
+        self.test_btn = ttk.Button(
+            frame_engine, text="Проверить переводчик", command=self._start_test_translator,
+        )
+        self.remember_keys_check = ttk.Checkbutton(
+            frame_engine, text="Запомнить ключ", variable=self.remember_keys_var,
+        )
 
         # --- Настройка Translate Gemma (отдельный блок, показывается
         # только для этого движка — см. _on_engine_changed) -------------
@@ -568,6 +606,7 @@ class App(tk.Tk):
             return
         self.project_path.set(path)
         self._refresh_project_dirs(show_warnings=True)
+        self._save_settings()
 
     def _choose_gemma_llama_folder(self):
         path = filedialog.askdirectory(
@@ -797,6 +836,16 @@ class App(tk.Tk):
             self.api_key_label.grid_remove()
             self.deepl_key_entry.grid_remove()
 
+        online = key in ("google", "deepl")
+        if online:
+            self.test_label.grid(row=0, column=2, sticky="w", padx=(20, 0))
+            self.test_btn.grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(2, 0))
+            self.remember_keys_check.grid(row=1, column=3, sticky="w", padx=(16, 0), pady=(2, 0))
+        else:
+            self.test_label.grid(row=0, column=3, sticky="w", padx=(16, 0))
+            self.test_btn.grid(row=1, column=3, sticky="w", padx=(16, 0), pady=(2, 0))
+            self.remember_keys_check.grid_remove()
+
         show_libre = key == "libretranslate"
         for w in (self.libre_url_label, self.libre_url_entry,
                   self.launch_libre_label, self.launch_libre_btn):
@@ -899,6 +948,9 @@ class App(tk.Tk):
                     self.start_btn.configure(state="normal")
                     self.status_var.set("")
                     continue
+                if isinstance(msg, tuple) and msg[0] == "__TEST_RESULT__":
+                    self._show_test_result(msg[1], msg[2])
+                    continue
                 if isinstance(msg, tuple) and msg[0] == "__ENABLE_WIDGET__":
                     widget = getattr(self, msg[1], None)
                     if widget is not None:
@@ -991,7 +1043,9 @@ class App(tk.Tk):
             )
             return
         lang_dir = os.path.join(self.tl_dir, lang_folder)
-        ui_editor.EditorWindow(self, lang_dir, lang_folder, log=self._log)
+        ui_editor.EditorWindow(
+            self, lang_dir, lang_folder, log=self._log,
+            dest_code=LANG_NAME_TO_CODE.get(self.dest_lang_var.get(), "ru"))
 
     def _refresh_prompt_list(self):
         """Обновляет выпадающий список «Промпт» по файлам *.txt в папке
@@ -1005,9 +1059,19 @@ class App(tk.Tk):
 
     def _load_selected_prompt(self, src_code=None, dest_code=None):
         """(имя файла, текст) выбранного промпта, с языками из окна,
-        подставленными вместо {SRC_LANG}/{DEST_LANG}. Если файл пуст или
-        не читается — показывает ошибку и возвращает (файл, None)."""
+        подставленными вместо {SRC_LANG}/{DEST_LANG}. Встроенных промптов в
+        программе нет: если в папке prompts пусто или выбранного файла нет /
+        он пуст — показывает уведомление и возвращает (None, None)."""
         filename = prompts.file_for_label(self.prompt_var.get())
+        if not filename:
+            messagebox.showerror(
+                "Нет промпта",
+                "Для перевода нейросетью нужен промпт, а в папке prompts нет "
+                "выбранного файла.\n\nДобавьте файл с текстом промпта "
+                "(*.txt, например prompt_1.txt) в папку:\n{0}\n\nи выберите его "
+                "в списке «Промпт».".format(prompts.PROMPTS_DIR),
+            )
+            return None, None
         text = prompts.load_file(filename, log=self._log, src_lang=src_code, dest_lang=dest_code)
         if text is None:
             messagebox.showerror(
@@ -1015,6 +1079,7 @@ class App(tk.Tk):
                 "Файл промпта prompts/{0} пуст или не читается. Впишите в него "
                 "текст промпта либо выберите другой промпт в списке.".format(filename),
             )
+            return None, None
         return filename, text
 
     def _apply_marker_setting(self):
@@ -1034,6 +1099,7 @@ class App(tk.Tk):
         return True
 
     def _start(self):
+        self._save_settings()
         if not self.tl_dir:
             messagebox.showerror("Ошибка", "Сначала выберите папку игры с папкой game/tl.")
             return
@@ -1087,6 +1153,14 @@ class App(tk.Tk):
             gemma_url = self.gemma_url_var.get().strip() or translate_gemma.DEFAULT_URL
 
             ctx_prompt = prompts.load_context(log=self._log, src_lang=src_code, dest_lang=dest_code)
+            if ctx_prompt is None:
+                messagebox.showerror(
+                    "Нет промпта для диалогов",
+                    "Translate Gemma переводит диалоги с контекстом, и для этого "
+                    "нужен файл prompt_context.txt в папке:\n{0}\n\nДобавьте его "
+                    "(с текстом промпта) и запустите перевод снова.".format(prompts.PROMPTS_DIR),
+                )
+                return
             _no_ctx_file, no_ctx_prompt = self._load_selected_prompt(src_code, dest_code)
             if no_ctx_prompt is None:
                 return
@@ -1155,6 +1229,17 @@ class App(tk.Tk):
                 "тариф 'DeepL API Free').",
             )
             return
+
+        if engine == "deepl":
+            for code in (src_code, dest_code):
+                if not deepl_translate.is_language_supported(code):
+                    messagebox.showerror(
+                        "Язык не поддерживается",
+                        "DeepL не поддерживает язык «{0}» ({1}). Выберите другой "
+                        "язык или другой переводчик (список поддерживаемых языков "
+                        "— в инструкции).".format(LANG_CODE_TO_NAME.get(code, code), code),
+                    )
+                    return
 
         libre_url = self.libre_url_var.get().strip() or libretranslate_translate.DEFAULT_URL
         libre_key = self.libre_key_var.get().strip()
@@ -1332,6 +1417,233 @@ class App(tk.Tk):
             self._log("Неожиданная ошибка при подготовке игры: {0}".format(e))
         finally:
             self.log_queue.put("__PREPARE_DONE__")
+
+    # ------------------------------------------------------------------
+    # Сохранение настроек между запусками
+    # ------------------------------------------------------------------
+    def _settings_vars(self):
+        """Переменные окна, которые запоминаются между запусками
+        (ключ в файле настроек -> переменная). Не запоминаются: галочка
+        «Переводить имена» (по задумке — только руками) и отдельные
+        временные состояния. Ключи API — отдельно, по галочке."""
+        return {
+            "src_lang": self.src_lang_var, "dest_lang": self.dest_lang_var,
+            "renpy_lang": self.renpy_lang_var, "marker": self.marker_var,
+            "batch_items": self.batch_items_var, "batch_delay": self.batch_delay_var,
+            "overwrite": self.overwrite_var, "use_cache": self.use_cache_var,
+            "clobber": self.clobber_var, "engine": self.engine_var,
+            "libre_url": self.libre_url_var,
+            "gemma_url": self.gemma_url_var, "gemma_ngl": self.gemma_ngl_var,
+            "gemma_np": self.gemma_np_var, "gemma_ctx": self.gemma_ctx_var,
+            "gemma_ntokens": self.gemma_ntokens_var,
+            "gemma_model_path": self.gemma_model_path_var,
+            "gemma_llama_folder": self.gemma_llama_folder_var,
+            "gemma4_url": self.gemma4_url_var, "gemma4_ngl": self.gemma4_ngl_var,
+            "gemma4_np": self.gemma4_np_var, "gemma4_ctx": self.gemma4_ctx_var,
+            "gemma4_ntokens": self.gemma4_ntokens_var,
+            "gemma4_model_path": self.gemma4_model_path_var,
+            "prompt_label": self.prompt_var, "gender": self.gender_var,
+            "player_female": self.player_female_var,
+            "remember_keys": self.remember_keys_var,
+        }
+
+    _KEY_VARS = (("deepl_key", "deepl_key_var"), ("google_key", "google_key_var"),
+                 ("libre_key", "libre_key_var"))
+
+    def _save_settings(self):
+        """Записывает настройки окна в _translator_settings.json. Ключи API
+        сохраняются, только если включена галочка «Запомнить ключ» (в
+        открытом виде); при выключенной — стираются из файла."""
+        try:
+            for key, var in self._settings_vars().items():
+                self.settings[key] = var.get()
+            self.settings["project_path"] = self.project_path.get().strip()
+            self.settings["lang_folder"] = self.lang_var.get()
+            self.settings.pop("sdk_dir", None)   # поле SDK убрано — SDK выбирается сам
+            for key, attr in self._KEY_VARS:
+                if self.remember_keys_var.get():
+                    self.settings[key] = getattr(self, attr).get()
+                else:
+                    self.settings.pop(key, None)
+            project.save_settings(self.settings_path, self.settings)
+        except Exception as e:
+            self._log("Не удалось сохранить настройки: {0}".format(e))
+
+    def _apply_saved_settings(self):
+        """Подставляет в окно сохранённые значения (вызывается один раз,
+        после построения окна)."""
+        st = self.settings
+        for key, var in self._settings_vars().items():
+            if key not in st:
+                continue
+            value = st[key]
+            var.set(value if isinstance(value, bool) else str(value))
+        if self.engine_var.get() not in ENGINE_NAMES:
+            self.engine_var.set(ENGINE_NAMES[0])
+        if self.src_lang_var.get() not in LANG_NAME_TO_CODE:
+            self.src_lang_var.set("Английский")
+        if self.dest_lang_var.get() not in LANG_NAME_TO_CODE:
+            self.dest_lang_var.set("Русский")
+        if self.renpy_lang_var.get() not in RENPY_LANG_CODES:
+            self.renpy_lang_var.set("ru")
+        if st.get("remember_keys"):
+            for key, attr in self._KEY_VARS:
+                if key in st:
+                    getattr(self, attr).set(str(st[key]))
+        self._refresh_prompt_list()
+        path = st.get("project_path", "")
+        if path and os.path.isdir(path):
+            self.project_path.set(path)
+            self._refresh_project_dirs(show_warnings=False)
+            saved_lang = st.get("lang_folder", "")
+            if self.tl_dir and saved_lang in project.list_language_folders(self.tl_dir):
+                self.lang_var.set(saved_lang)
+
+    def _on_close(self):
+        self._save_settings()
+        self.destroy()
+
+    # ------------------------------------------------------------------
+    # Кнопка «Проверить переводчик»
+    # ------------------------------------------------------------------
+    def _start_test_translator(self):
+        """Отправляет тестовую строку в УЖЕ работающий переводчик и показывает
+        ответ, время и (для нейросетей) скорость. Ничего не запускает и не
+        меняет; у нейросетевых движков используется промпт, выбранный в
+        списке «Промпт»."""
+        engine = self._current_engine_key()
+        src_code = LANG_NAME_TO_CODE.get(self.src_lang_var.get(), "en")
+        dest_code = LANG_NAME_TO_CODE.get(self.dest_lang_var.get(), "ru")
+        cfg = {"engine": engine, "src": src_code, "dest": dest_code}
+
+        if engine == "deepl":
+            cfg["key"] = self.deepl_key_var.get().strip()
+            if not cfg["key"]:
+                messagebox.showerror("Нужен ключ DeepL", "Вставьте ключ DeepL API в поле выше.")
+                return
+            for code in (src_code, dest_code):
+                if not deepl_translate.is_language_supported(code):
+                    messagebox.showerror(
+                        "Язык не поддерживается",
+                        "DeepL не поддерживает язык «{0}» ({1}).".format(
+                            LANG_CODE_TO_NAME.get(code, code), code))
+                    return
+        elif engine == "google":
+            cfg["key"] = self.google_key_var.get().strip()
+        elif engine == "libretranslate":
+            cfg["url"] = self.libre_url_var.get().strip() or libretranslate_translate.DEFAULT_URL
+            cfg["key"] = self.libre_key_var.get().strip()
+        else:
+            try:
+                if engine == "gemma":
+                    cfg["n_predict"] = self._int_or_default(
+                        self.gemma_ntokens_var.get(), translate_gemma.DEFAULT_N_PREDICT,
+                        "Токенов в ответе (max)")
+                    cfg["url"] = self.gemma_url_var.get().strip() or translate_gemma.DEFAULT_URL
+                else:
+                    cfg["n_predict"] = self._int_or_default(
+                        self.gemma4_ntokens_var.get(), gemma4_translate.DEFAULT_N_PREDICT,
+                        "Токенов в ответе (max)")
+                    cfg["url"] = self.gemma4_url_var.get().strip() or gemma4_translate.DEFAULT_URL
+            except ValueError as e:
+                messagebox.showerror("Неверное значение", str(e))
+                return
+            _file, prompt_text = self._load_selected_prompt(src_code, dest_code)
+            if prompt_text is None:
+                return
+            cfg["prompt"] = prompt_text
+
+        self._test_seq += 1
+        seq = self._test_seq
+        dlg = tk.Toplevel(self)
+        dlg.title("Проверка переводчика")
+        dlg.geometry("720x520")
+        box = tk.Text(dlg, wrap="word")
+        box.pack(fill="both", expand=True, padx=8, pady=8)
+        box.insert("end", "Отправляю тестовую строку в «{0}»... Ожидаю ответа.\n".format(
+            self.engine_var.get()))
+        self._test_dialog = (seq, dlg, box)
+        self.test_btn.configure(state="disabled")
+        threading.Thread(target=self._test_worker, args=(cfg, seq), daemon=True).start()
+
+    def _test_worker(self, cfg, seq):
+        engine, src, dest = cfg["engine"], cfg["src"], cfg["dest"]
+        answer, info, error = None, {}, None
+        t0 = time.monotonic()
+        try:
+            if engine == "google":
+                if cfg.get("key"):
+                    answer = google_api_translate.raw_translate_batch(
+                        [TEST_TEXT], cfg["key"], src, dest, timeout=60)[0]
+                else:
+                    answer = gtranslate.raw_translate(TEST_TEXT, src, dest, timeout=60)
+            elif engine == "deepl":
+                answer = deepl_translate.raw_translate_batch(
+                    [TEST_TEXT], cfg["key"], src, dest, timeout=60)[0]
+            elif engine == "libretranslate":
+                answer = libretranslate_translate.raw_translate_batch(
+                    [TEST_TEXT], cfg["url"], _libre_code(src), _libre_code(dest),
+                    cfg.get("key") or None, timeout=120)[0]
+            elif engine == "gemma":
+                answer, info = translate_gemma.raw_translate(
+                    cfg["url"], "", "", TEST_TEXT, rules_name=None,
+                    system_prompt=cfg["prompt"], max_tokens=cfg["n_predict"],
+                    timeout=300, return_info=True)
+            else:
+                answer, info = gemma4_translate.raw_translate(
+                    cfg["url"], cfg["prompt"], TEST_TEXT, cfg["n_predict"],
+                    timeout=300, return_info=True)
+        except Exception as e:
+            error = "{0}: {1}".format(type(e).__name__, e)
+        elapsed = time.monotonic() - t0
+
+        lines = [
+            "Переводчик: {0}".format(self.engine_var.get()),
+            "Языки: {0} → {1}".format(src, dest),
+            "Время обработки: {0:.2f} с".format(elapsed),
+        ]
+        if engine in ("gemma", "gemma4") and not error:
+            tokens = info.get("completion_tokens")
+            speed = info.get("predicted_per_second")
+            if speed:
+                lines.append("Скорость: {0:.1f} токенов/с{1}".format(
+                    speed, " ({0} токенов в ответе)".format(tokens) if tokens else ""))
+            elif tokens:
+                lines.append("Скорость: ≈{0:.1f} токенов/с (по общему времени, {1} токенов "
+                             "в ответе)".format(tokens / elapsed if elapsed else 0, tokens))
+            if info.get("finish_reason") == "length":
+                lines.append(
+                    "ВНИМАНИЕ: ответ оборван по лимиту токенов. Увеличьте «Токенов в "
+                    "ответе (max)» (-n) и проверьте «Контекстное окно» (-c) — оно "
+                    "делится между потоками (-np).")
+        lines.append("")
+        lines.append("--- Отправлено ---")
+        lines.append(TEST_TEXT)
+        lines.append("")
+        if error:
+            lines.append("--- ОШИБКА ---")
+            lines.append(error)
+        else:
+            lines.append("--- Ответ переводчика ---")
+            lines.append(answer if answer else "(пустой ответ)")
+            lines.append("")
+            lines.append(
+                "Если текст переведён на нужный язык и в конце есть слово «End» (или "
+                "его перевод), переводчик запущен корректно. Если конца нет — "
+                "увеличьте контекстное окно.")
+        self.log_queue.put(("__TEST_RESULT__", seq, "\n".join(lines)))
+
+    def _show_test_result(self, seq, report):
+        self.test_btn.configure(state="normal")
+        dialog = self._test_dialog
+        if not dialog or dialog[0] != seq:
+            return
+        try:
+            box = dialog[2]
+            box.delete("1.0", "end")
+            box.insert("end", report)
+        except Exception:
+            pass   # окно уже закрыто
 
     def _update_gender_widgets(self):
         """«Согласование по роду» доступно только для Gemma 4, «Player —
@@ -1661,11 +1973,23 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     def _start_launch_libretranslate(self):
         self.launch_libre_btn.configure(state="disabled")
-        threading.Thread(target=self._launch_libretranslate_worker, daemon=True).start()
+        # Загружаем модели для стандартного набора И для выбранной пары
+        # языков (плюс английский — Argos переводит через него), иначе новые
+        # языки (арабский, хинди...) сервер просто не знал бы.
+        languages = list(libretranslate_launcher.DEFAULT_LOAD_ONLY)
+        for code in ("en",
+                     LANG_NAME_TO_CODE.get(self.src_lang_var.get(), "en"),
+                     LANG_NAME_TO_CODE.get(self.dest_lang_var.get(), "ru")):
+            code = _libre_code(code).lower()
+            if code not in languages:
+                languages.append(code)
+        threading.Thread(
+            target=self._launch_libretranslate_worker, args=(languages,), daemon=True,
+        ).start()
 
-    def _launch_libretranslate_worker(self):
+    def _launch_libretranslate_worker(self, languages=None):
         try:
-            libretranslate_launcher.launch(log=self._log)
+            libretranslate_launcher.launch(languages=languages, log=self._log)
             self._log(
                 "LibreTranslate запущен в отдельном окне консоли. Дождитесь "
                 "в нём строки о готовности сервера (обычно "

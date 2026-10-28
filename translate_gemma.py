@@ -32,13 +32,9 @@ DEFAULT_NP = 2
 DEFAULT_CTX = 2048
 DEFAULT_N_PREDICT = 256
 
-# Тексты промптов вынесены в папку prompts/ (см. prompts.py). Эти две
-# константы — встроенные запасные варианты; рабочий текст GemmaTranslator
-# получает снаружи (context_prompt / no_context_prompt).
-import prompts
-
-SYSTEM_PROMPT = prompts.BUILTIN["prompt_context.txt"]
-SYSTEM_PROMPT_NO_CONTEXT = prompts.BUILTIN["prompt_1.txt"]
+# Тексты промптов лежат в папке prompts/ (см. prompts.py) — встроенных
+# вариантов в программе нет: GemmaTranslator получает рабочий текст снаружи
+# (context_prompt / no_context_prompt).
 
 
 class GemmaError(Exception):
@@ -69,7 +65,7 @@ _looks_truncated = core.looks_truncated
 
 def build_messages(previous_source, previous_translation, current_source, rules_name=None,
                     system_prompt=None):
-    system = system_prompt if system_prompt is not None else SYSTEM_PROMPT
+    system = system_prompt or ""
     if rules_name:
         system += "\n\nRULES: Speakers name: {0}".format(rules_name)
 
@@ -87,10 +83,14 @@ def build_messages(previous_source, previous_translation, current_source, rules_
 
 
 def raw_translate(base_url, previous_source, previous_translation, current_source,
-                   rules_name=None, system_prompt=None, max_tokens=DEFAULT_N_PREDICT, timeout=60):
+                   rules_name=None, system_prompt=None, max_tokens=DEFAULT_N_PREDICT, timeout=60,
+                   return_info=False):
     """Один запрос к /v1/chat/completions. Возвращает переведённый текст
     (обрезанный по краям пробелов). Бросает GemmaError при сетевой или
-    протокольной ошибке."""
+    протокольной ошибке. С return_info=True возвращает пару (текст, info),
+    где info — dict с completion_tokens, predicted_per_second (скорость,
+    если сервер её сообщил) и finish_reason ("length" — ответ оборван по
+    лимиту токенов); используется кнопкой «Проверить переводчик»."""
     url = base_url.rstrip("/") + "/v1/chat/completions"
     payload = {
         "messages": build_messages(
@@ -121,9 +121,17 @@ def raw_translate(base_url, previous_source, previous_translation, current_sourc
         )
     try:
         data = json.loads(raw)
-        return data["choices"][0]["message"]["content"].strip()
+        text = data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         raise GemmaError("Неожиданный ответ сервера: {0}".format(e))
+    if not return_info:
+        return text
+    info = {
+        "completion_tokens": (data.get("usage") or {}).get("completion_tokens"),
+        "predicted_per_second": (data.get("timings") or {}).get("predicted_per_second"),
+        "finish_reason": data["choices"][0].get("finish_reason"),
+    }
+    return text, info
 
 
 class GemmaTranslator:
@@ -137,10 +145,14 @@ class GemmaTranslator:
     def __init__(self, base_url, max_tokens=DEFAULT_N_PREDICT, retries=2,
                  log=None, on_progress=None, stop_event=None,
                  context_prompt=None, no_context_prompt=None):
-        # Тексты системных промптов приходят снаружи (из папки prompts/);
-        # None -> встроенные запасные варианты.
-        self.context_prompt = context_prompt or SYSTEM_PROMPT
-        self.no_context_prompt = no_context_prompt or SYSTEM_PROMPT_NO_CONTEXT
+        # Тексты системных промптов приходят снаружи (из папки prompts/).
+        if not context_prompt or not no_context_prompt:
+            raise ValueError(
+                "Не заданы тексты промптов (prompt_context.txt и выбранный "
+                "промпт из папки prompts/)."
+            )
+        self.context_prompt = context_prompt
+        self.no_context_prompt = no_context_prompt
         self.base_url = (base_url or DEFAULT_URL).strip()
         self.max_tokens = max_tokens
         self.retries = retries
