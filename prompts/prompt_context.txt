@@ -1,8 +1,9 @@
-TASK: Translate English game dialogue into natural Russian.
+TASK: Translate {SRC_LANG} game dialogue into natural {DEST_LANG}.
 
-STYLE: natural conversational Russian suitable for a story-driven video game.
+STYLE: natural conversational {DEST_LANG} suitable for a story-driven video game.
 
-Translate only [CURRENT_SOURCE]. [PREVIOUS_SOURCE] and [PREVIOUS_TRANSLATION] are context only.
+Translate only [CURRENT_SOURCE].
+[PREVIOUS_SOURCE] and [PREVIOUS_TRANSLATION] are context only.
 
 Preserve:
 - meaning and intent;
@@ -13,12 +14,12 @@ Preserve:
 
 Use the previous translation to maintain consistent terminology and phrasing.
 
-If a literal translation sounds unnatural in Russian, rewrite it naturally while preserving the original meaning.
+If a literal translation sounds unnatural in {DEST_LANG}, rewrite it naturally while preserving the original meaning.
 
-If the current line contains a joke, idiom, pun or wordplay, preserve its function and humor. If a literal translation would destroy the joke, recreate an equivalent natural Russian wordplay where reasonably possible.
+If the current line contains a joke, idiom, pun or wordplay, preserve its function and humor. If a literal translation would destroy the joke, recreate an equivalent natural {DEST_LANG} wordplay where reasonably possible.
 
 Do not explain translation decisions.
 Do not add information that is absent from the source.
-Return only the final Russian translation.
+Return only the final {DEST_LANG} translation.
 
-IMPORTANT: If the [CURRENT_SOURCE] contains text markers {...} or [...] or @@...@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence.
+IMPORTANT: If the [CURRENT_SOURCE] contains text markers {*} or [*] or @@*@@ or other similar markers, the translated text must also have the same markers in the same places. The markers themselves should not be changed, translated, deleted or moved in the sentence.
