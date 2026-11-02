@@ -31,6 +31,7 @@
 не трогая теги Ren'Py вида {b}...{/b} и подстановки вида [name].
 """
 
+from i18n import mark, tr
 import re
 
 # ---------------------------------------------------------------------------
@@ -121,7 +122,7 @@ DEFAULT_MARKER_TEMPLATE = "Zqtx{N}xtqZ"
 # переводчик уходит исходная строка как есть ({b}, [name], %s и т.д.).
 # Целостность проверяется не по маркерам, а прямым сравнением списка
 # тегов/подстановок в оригинале и переводе (см. _structure_ok()).
-NO_MARKER_LABEL = "Без разделителя"
+NO_MARKER_LABEL = mark("Без разделителя")
 _NO_MARKERS = False
 
 # Куски, которые в режиме без разделителя НЕ сравниваются: экранированные
@@ -153,17 +154,17 @@ def parse_marker_template(template):
     template = (template or "").strip()
     if template.count("{N}") != 1:
         raise ValueError(
-            "Разделитель должен содержать ровно один {N} — это место, "
+            tr("Разделитель должен содержать ровно один {N} — это место, "
             "куда программа подставит номер защищённого куска. Например: "
-            "Zqtx{N}xtqZ"
+            "Zqtx{N}xtqZ")
         )
     if any(ch.isspace() for ch in template):
-        raise ValueError("В разделителе не должно быть пробелов.")
+        raise ValueError(tr("В разделителе не должно быть пробелов."))
     open_part, close_part = template.split("{N}")
     if not open_part or not close_part:
         raise ValueError(
-            "У разделителя должен быть текст и до, и после {N} — например "
-            "Zqtx{N}xtqZ."
+            tr("У разделителя должен быть текст и до, и после {N} — например "
+            "Zqtx{N}xtqZ.")
         )
     return open_part, close_part
 
@@ -628,9 +629,9 @@ def collect_needed_texts(lines, overwrite=False, key_fn=None, resolve_fn=None, p
 
 
 def _failed_msg(orig_quoted, file_name):
-    msg = "Не удалось перевести (оставлено как есть): {0!r}".format(orig_quoted[:80])
+    msg = tr("Не удалось перевести (оставлено как есть): {0!r}").format(orig_quoted[:80])
     if file_name:
-        msg += " в файле {0}".format(file_name)
+        msg += tr(" в файле {0}").format(file_name)
     return msg
 
 
@@ -802,12 +803,12 @@ def tag_problems(source_inner, translated_inner):
         else:
             only_tr.append(p)
     if only_src:
-        problems.append("нет в переводе: " + " ".join(only_src))
+        problems.append(tr("нет в переводе: ") + " ".join(only_src))
     if only_tr:
-        problems.append("лишнее в переводе: " + " ".join(only_tr))
+        problems.append(tr("лишнее в переводе: ") + " ".join(only_tr))
     if not problems and not _structure_ok(source_inner, translated_inner):
-        problems.append("теги {..} идут в другом порядке")
+        problems.append(tr("теги {..} идут в другом порядке"))
     if _ends_with_odd_backslash(translated_inner):
-        problems.append("строка заканчивается одиночным \\ (сломает кавычку)")
+        problems.append(tr("строка заканчивается одиночным \\ (сломает кавычку)"))
     return problems
 

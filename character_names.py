@@ -35,6 +35,7 @@ Ren'Py обычно объявляет персонажей строкой ви�
   отступления) — для RULES получает "Narrator".
 """
 
+from i18n import tr
 import os
 import re
 
@@ -130,22 +131,22 @@ def migrate_legacy_names_file(lang_dir, log=None):
         # Оба файла почему-то есть — не угадываем, какой актуален,
         # просто предупреждаем и ничего не трогаем.
         log(
-            "  Внимание: найдены оба файла имён — старый {0} и новый "
+            tr("  Внимание: найдены оба файла имён — старый {0} и новый "
             "{1}. Оставляю как есть, разберитесь вручную, какой "
-            "актуален (скорее всего можно удалить старый {0})."
+            "актуален (скорее всего можно удалить старый {0}).")
             .format(LEGACY_NAMES_FILENAME, NAMES_FILENAME)
         )
         return False
     try:
         os.rename(legacy_path, new_path)
     except Exception as e:
-        log("  ОШИБКА переноса {0} -> {1}: {2}".format(LEGACY_NAMES_FILENAME, NAMES_FILENAME, e))
+        log(tr("  ОШИБКА переноса {0} -> {1}: {2}").format(LEGACY_NAMES_FILENAME, NAMES_FILENAME, e))
         return False
     log(
-        "  Старый {0} (Ren'Py пытался парсить его как часть сценария и "
+        tr("  Старый {0} (Ren'Py пытался парсить его как часть сценария и "
         "падал с ошибкой \"Parsing the script failed.\") перенесён в "
         "{1} — уже переведённые имена сохранены, файла с расширением "
-        ".rpy в tl/ больше нет.".format(LEGACY_NAMES_FILENAME, NAMES_FILENAME)
+        ".rpy в tl/ больше нет.").format(LEGACY_NAMES_FILENAME, NAMES_FILENAME)
     )
     return True
 
@@ -224,7 +225,7 @@ def update_character_names_file(game_dir, names_path, log=None):
     found = _scan_character_definitions(game_dir)
     new_entries = [d for d in found if d["code"] not in known_codes]
     if not new_entries:
-        log("Новых персонажей не найдено — файл имён не изменился.")
+        log(tr("Новых персонажей не найдено — файл имён не изменился."))
         return 0
 
     chunk = []
@@ -243,7 +244,7 @@ def update_character_names_file(game_dir, names_path, log=None):
     with open(names_path, mode, encoding="utf-8") as f:
         f.write("\n".join(chunk).rstrip("\n") + "\n")
 
-    log("Добавлено новых персонажей в файл имён: {0}.".format(len(new_entries)))
+    log(tr("Добавлено новых персонажей в файл имён: {0}.").format(len(new_entries)))
     return len(new_entries)
 
 
@@ -298,7 +299,7 @@ def _patch_character_line(path, code, new_name, new_who_font, log):
         with open(path, "r", encoding="utf-8", newline="") as f:
             lines = f.readlines()
     except Exception as e:
-        log("  ОШИБКА чтения {0}: {1}".format(path, e))
+        log(tr("  ОШИБКА чтения {0}: {1}").format(path, e))
         return False
 
     pattern = re.compile(
@@ -315,7 +316,7 @@ def _patch_character_line(path, code, new_name, new_who_font, log):
         prefix, args, suffix = m.group(1), m.group(2), m.group(3)
         name_m = _RE_ARG_NAME.match(args.lstrip())
         if not name_m:
-            log("  {0}: не удалось найти имя в определении {1!r} — пропускаю.".format(path, code))
+            log(tr("  {0}: не удалось найти имя в определении {1!r} — пропускаю.").format(path, code))
             return False
         lead_ws = args[:len(args) - len(args.lstrip())]
         quote = name_m.group("q")
@@ -336,7 +337,7 @@ def _patch_character_line(path, code, new_name, new_who_font, log):
             with open(path, "w", encoding="utf-8", newline="") as f:
                 f.writelines(lines)
         except Exception as e:
-            log("  ОШИБКА записи {0}: {1}".format(path, e))
+            log(tr("  ОШИБКА записи {0}: {1}").format(path, e))
             return False
         # Рядом с .rpy почти наверняка лежит скомпилированный .rpyc,
         # оставшийся от предыдущего запуска игры (или сохранённый вместе
@@ -352,10 +353,10 @@ def _patch_character_line(path, code, new_name, new_who_font, log):
             try:
                 os.remove(rpyc_path)
             except Exception as e:
-                log("  ОШИБКА удаления устаревшего {0}: {1}".format(rpyc_path, e))
+                log(tr("  ОШИБКА удаления устаревшего {0}: {1}").format(rpyc_path, e))
         return True
 
-    log("  {0}: определение персонажа {1!r} не найдено — пропускаю.".format(path, code))
+    log(tr("  {0}: определение персонажа {1!r} не найдено — пропускаю.").format(path, code))
     return False
 
 
@@ -400,10 +401,10 @@ def apply_character_names(game_dir, entries, use_translated, light_font_rel=None
                     target_who_font = light_font_rel
                 elif not warned_no_light_font:
                     log(
-                        "Запасной шрифт (*-Light.ttf/.otf) не найден в "
+                        tr("Запасной шрифт (*-Light.ttf/.otf) не найден в "
                         "папке fonts — шрифты персонажей со своим who_font "
                         "не меняются (текст имени может отображаться "
-                        "некорректно)."
+                        "некорректно).")
                     )
                     warned_no_light_font = True
             else:
@@ -412,8 +413,8 @@ def apply_character_names(game_dir, entries, use_translated, light_font_rel=None
         if use_translated and not is_translated:
             stats["untranslated"] += 1
             log(
-                "Имя {0!r} не переведено — переведите его в {1} и "
-                "включите галочку заново.".format(e["old"], NAMES_FILENAME)
+                tr("Имя {0!r} не переведено — переведите его в {1} и "
+                "включите галочку заново.").format(e["old"], NAMES_FILENAME)
             )
 
         path = os.path.join(game_dir, *e["file"].split("/"))

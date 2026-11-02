@@ -20,6 +20,7 @@
 Документация: https://docs.libretranslate.com/
 """
 
+from i18n import tr
 import json
 import time
 import urllib.error
@@ -45,6 +46,36 @@ class LibreTranslateRequestError(LibreTranslateError):
     def __init__(self, status, message):
         super().__init__("HTTP {0}: {1}".format(status, message))
         self.status = status
+
+
+def fetch_languages(base_url, timeout=5):
+    """Спрашивает у РАБОТАЮЩЕГО сервера список языков (GET /languages) и
+    возвращает {код_языка: множество_кодов_на_которые_можно_перевести}."""
+    url = base_url.rstrip("/") + "/languages"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        raise LibreTranslateConnectionError(
+            tr("Не удалось подключиться к LibreTranslate по адресу {0} ({1}).").format(url, e.reason)
+        )
+    return {item["code"]: set(item.get("targets") or []) for item in data}
+
+
+def pair_status(base_url, src, dest, timeout=5):
+    """Умеет ли запущенный сервер переводить src -> dest. Возвращает
+    (True, "") / (False, текст_причины) / (None, "") — если сервер не
+    отвечает (тогда решать вызывающему коду; обычная ошибка соединения
+    всё равно появится при самом переводе)."""
+    try:
+        langs = fetch_languages(base_url, timeout)
+    except Exception:
+        return None, ""
+    if src not in langs:
+        return False, tr("сервер не загрузил язык «{0}»").format(src)
+    if dest not in langs[src]:
+        return False, tr("сервер не умеет переводить {0} → {1} (не загружены нужные языки)").format(src, dest)
+    return True, ""
 
 
 def raw_translate_batch(texts, base_url, src, dest, api_key=None, timeout=60):
@@ -81,9 +112,9 @@ def raw_translate_batch(texts, base_url, src, dest, api_key=None, timeout=60):
         raise LibreTranslateRequestError(e.code, msg)
     except urllib.error.URLError as e:
         raise LibreTranslateConnectionError(
-            "Не удалось подключиться к LibreTranslate по адресу {0} ({1}). "
+            tr("Не удалось подключиться к LibreTranslate по адресу {0} ({1}). "
             "Убедитесь, что программа LibreTranslate запущена на этом "
-            "компьютере и адрес указан верно.".format(url, e.reason)
+            "компьютере и адрес указан верно.").format(url, e.reason)
         )
     data = json.loads(raw)
     result = data.get("translatedText")
@@ -92,7 +123,7 @@ def raw_translate_batch(texts, base_url, src, dest, api_key=None, timeout=60):
     if not isinstance(result, list) or len(result) != len(texts):
         raise LibreTranslateRequestError(
             200,
-            "Неожиданный ответ сервера ({0} строк вместо {1})."
+            tr("Неожиданный ответ сервера ({0} строк вместо {1}).")
             .format(len(result) if isinstance(result, list) else "?", len(texts)),
         )
     return result
@@ -214,7 +245,7 @@ class LibreTranslator:
                     # молча пробуем разделить её (см. _translate_with_split).
                     return False
                 self.log(
-                    "Ошибка LibreTranslate (попытка {0}/{1}): {2}."
+                    tr("Ошибка LibreTranslate (попытка {0}/{1}): {2}.")
                     .format(attempt, self.retries, e)
                 )
                 time.sleep(cooldown)
@@ -223,14 +254,14 @@ class LibreTranslator:
             except Exception as e:
                 wait = min(1.0 * attempt, 5.0)
                 self.log(
-                    "Ошибка сети LibreTranslate (попытка {0}/{1}): {2}. "
-                    "Повтор через {3:.1f} с.".format(attempt, self.retries, e, wait)
+                    tr("Ошибка сети LibreTranslate (попытка {0}/{1}): {2}. "
+                    "Повтор через {3:.1f} с.").format(attempt, self.retries, e, wait)
                 )
                 time.sleep(wait)
 
         self.stats["errors"] += len(batch)
         self.log(
-            "Не удалось перевести {0} строк через LibreTranslate, оставляю "
-            "оригинал.".format(len(batch))
+            tr("Не удалось перевести {0} строк через LibreTranslate, оставляю "
+            "оригинал.").format(len(batch))
         )
         return True

@@ -14,6 +14,7 @@ Ren'Py 6/7, но сам инструмент в этой ветке рассчи
 он не запустится, актуальные игры это обычно не затрагивает.
 """
 
+from i18n import tr
 import io
 import os
 import re
@@ -41,24 +42,24 @@ def download(tools_dir, branch=DEFAULT_BRANCH, log=None, timeout=60):
     Нужен интернет только на этот разовый шаг."""
     log = log or (lambda msg: None)
     url = REPO_ZIP_URL.format(branch=branch)
-    log("Скачиваю unrpyc (CensoredUsername/unrpyc, MIT) с {0} ...".format(url))
+    log(tr("Скачиваю unrpyc (CensoredUsername/unrpyc, MIT) с {0} ...").format(url))
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
     except urllib.error.URLError as e:
         raise UnrpycError(
-            "Не удалось скачать unrpyc ({0}). Проверьте подключение к "
+            tr("Не удалось скачать unrpyc ({0}). Проверьте подключение к "
             "интернету, либо скачайте вручную с "
             "https://github.com/CensoredUsername/unrpyc и распакуйте "
-            "содержимое в папку: {1}".format(e, tools_dir)
+            "содержимое в папку: {1}").format(e, tools_dir)
         )
 
     os.makedirs(tools_dir, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         names = zf.namelist()
         if not names:
-            raise UnrpycError("Скачанный архив unrpyc оказался пустым.")
+            raise UnrpycError(tr("Скачанный архив unrpyc оказался пустым."))
         # В архиве всё лежит внутри одной папки вида "unrpyc-master/" —
         # убираем этот общий префикс, чтобы unrpyc.py оказался прямо в
         # tools_dir, рядом с папкой decompiler/.
@@ -78,10 +79,10 @@ def download(tools_dir, branch=DEFAULT_BRANCH, log=None, timeout=60):
 
     if not is_installed(tools_dir):
         raise UnrpycError(
-            "unrpyc скачался, но unrpyc.py не найден внутри архива — "
-            "возможно, структура репозитория изменилась."
+            tr("unrpyc скачался, но unrpyc.py не найден внутри архива — "
+            "возможно, структура репозитория изменилась.")
         )
-    log("unrpyc готов к использованию ({0}).".format(tools_dir))
+    log(tr("unrpyc готов к использованию ({0}).").format(tools_dir))
 
 
 _RE_PROCESSED = re.compile(r'Processed (\d+) files\.')
@@ -124,17 +125,17 @@ def find_and_remove_ren_py_conflicts(game_dir, log=None):
                     os.remove(ren_path)
                 except Exception as e:
                     log(
-                        "  ОШИБКА: не удалось удалить конфликтующий {0}: {1}"
+                        tr("  ОШИБКА: не удалось удалить конфликтующий {0}: {1}")
                         .format(ren_path, e)
                     )
                     break
                 removed.append(ren_path)
                 log(
-                    "  Удалён {0} — конфликтует с {1} (Ren'Py не может "
+                    tr("  Удалён {0} — конфликтует с {1} (Ren'Py не может "
                     "загрузить оба сразу и отказывается запускаться; "
                     "такой конфликт остаётся, если игра уже была "
                     "распакована/пропатчена сторонним инструментом до "
-                    "этой программы).".format(ren_path, sibling_path)
+                    "этой программы).").format(ren_path, sibling_path)
                 )
                 break
     return removed
@@ -174,7 +175,7 @@ def decompile_all(game_dir, tools_dir, log=None, timeout=None, clobber=False):
     log = log or (lambda msg: None)
     unrpyc_py = os.path.join(tools_dir, "unrpyc.py")
     if not os.path.isfile(unrpyc_py):
-        raise UnrpycError("unrpyc.py не найден в {0}".format(tools_dir))
+        raise UnrpycError(tr("unrpyc.py не найден в {0}").format(tools_dir))
 
     targets = _find_rpy_targets(game_dir)
     existed_before = {t for t in targets if os.path.isfile(t)}
@@ -182,7 +183,7 @@ def decompile_all(game_dir, tools_dir, log=None, timeout=None, clobber=False):
     cmd = [sys.executable, unrpyc_py, game_dir]
     if clobber:
         cmd.append("--clobber")
-    log("Запускаю: {0}".format(" ".join(cmd)))
+    log(tr("Запускаю: {0}").format(" ".join(cmd)))
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
@@ -205,8 +206,8 @@ def decompile_all(game_dir, tools_dir, log=None, timeout=None, clobber=False):
     proc.wait(timeout=timeout)
     if proc.returncode != 0:
         raise UnrpycError(
-            "unrpyc завершился с ошибкой (код {0}). Смотрите сообщения "
-            "выше в журнале.".format(proc.returncode)
+            tr("unrpyc завершился с ошибкой (код {0}). Смотрите сообщения "
+            "выше в журнале.").format(proc.returncode)
         )
 
     existed_after = {t for t in targets if os.path.isfile(t)}

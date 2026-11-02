@@ -20,6 +20,7 @@ translate_line() на каждую строку по очереди.
 интерфейса) и [CURRENT_SOURCE].
 """
 
+from i18n import tr
 import json
 import urllib.error
 import urllib.request
@@ -31,6 +32,7 @@ DEFAULT_NGL = 99
 DEFAULT_NP = 2
 DEFAULT_CTX = 2048
 DEFAULT_N_PREDICT = 256
+DEFAULT_MTP = 0      # предлагаемых токенов MTP (0 — без MTP)
 
 # Тексты промптов лежат в папке prompts/ (см. prompts.py) — встроенных
 # вариантов в программе нет: GemmaTranslator получает рабочий текст снаружи
@@ -115,15 +117,15 @@ def raw_translate(base_url, previous_source, previous_translation, current_sourc
         raise GemmaError("HTTP {0}: {1}".format(e.code, body_text[:300]))
     except urllib.error.URLError as e:
         raise GemmaError(
-            "Не удалось подключиться к Translate Gemma по адресу {0} ({1}). "
+            tr("Не удалось подключиться к Translate Gemma по адресу {0} ({1}). "
             "Убедитесь, что сервер запущен (кнопка «Запустить Translate "
-            "Gemma») и адрес указан верно.".format(url, e.reason)
+            "Gemma») и адрес указан верно.").format(url, e.reason)
         )
     try:
         data = json.loads(raw)
         text = data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        raise GemmaError("Неожиданный ответ сервера: {0}".format(e))
+        raise GemmaError(tr("Неожиданный ответ сервера: {0}").format(e))
     if not return_info:
         return text
     info = {
@@ -148,8 +150,8 @@ class GemmaTranslator:
         # Тексты системных промптов приходят снаружи (из папки prompts/).
         if not context_prompt or not no_context_prompt:
             raise ValueError(
-                "Не заданы тексты промптов (prompt_context.txt и выбранный "
-                "промпт из папки prompts/)."
+                tr("Не заданы тексты промптов (prompt_context.txt и выбранный "
+                "промпт из папки prompts/).")
             )
         self.context_prompt = context_prompt
         self.no_context_prompt = no_context_prompt
@@ -208,17 +210,17 @@ class GemmaTranslator:
                 )
                 if _looks_like_prompt_leak(result):
                     self.log(
-                        "Translate Gemma вернула повреждённый ответ (перенос "
+                        tr("Translate Gemma вернула повреждённый ответ (перенос "
                         "строки или обрывок промпта вроде \"[CURRENT_SOURCE]\" "
-                        "в тексте) — повторяю (попытка {0}/{1})..."
+                        "в тексте) — повторяю (попытка {0}/{1})...")
                         .format(attempt, self.retries)
                     )
                     continue
                 if _looks_truncated(current_source, result):
                     self.log(
-                        "Translate Gemma потеряла часть текста за пределами "
+                        tr("Translate Gemma потеряла часть текста за пределами "
                         "тегов (в ответе осталось только то, что внутри "
-                        "{{...}}) — повторяю (попытка {0}/{1})..."
+                        "{{...}}) — повторяю (попытка {0}/{1})...")
                         .format(attempt, self.retries)
                     )
                     continue
@@ -227,9 +229,9 @@ class GemmaTranslator:
                 return result
             except GemmaError as e:
                 self.log(
-                    "Ошибка Translate Gemma (попытка {0}/{1}): {2}."
+                    tr("Ошибка Translate Gemma (попытка {0}/{1}): {2}.")
                     .format(attempt, self.retries, e)
                 )
         self.stats["errors"] += 1
-        self.log("Не удалось перевести строку через Translate Gemma, оставляю оригинал.")
+        self.log(tr("Не удалось перевести строку через Translate Gemma, оставляю оригинал."))
         return None

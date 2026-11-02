@@ -11,6 +11,7 @@
 гарантировано самим API, без риска перепутать реплики.
 """
 
+from i18n import tr
 import json
 import random
 import time
@@ -103,15 +104,15 @@ def raw_translate_batch(texts, api_key, src, dest, timeout=15):
             raise RateLimited(retry_after)
         if e.code == 456:
             raise DeepLError(
-                "Месячная бесплатная квота DeepL (500 000 символов) исчерпана. "
-                "Подождите начала следующего месяца или используйте Google Translate."
+                tr("Месячная бесплатная квота DeepL (500 000 символов) исчерпана. "
+                "Подождите начала следующего месяца или используйте Google Translate.")
             )
         if e.code == 403:
             raise DeepLError(
-                "DeepL отклонил ключ API (403) — проверьте, что ключ скопирован "
-                "полностью и без лишних пробелов."
+                tr("DeepL отклонил ключ API (403) — проверьте, что ключ скопирован "
+                "полностью и без лишних пробелов.")
             )
-        raise DeepLError("Ошибка DeepL (HTTP {0}): {1}".format(e.code, body_text[:200]))
+        raise DeepLError(tr("Ошибка DeepL (HTTP {0}): {1}").format(e.code, body_text[:200]))
     parsed = json.loads(raw)
     return [item["text"] for item in parsed["translations"]]
 
@@ -201,8 +202,8 @@ class DeepLTranslator:
                 parts = raw_translate_batch(batch, self.api_key, self.src, self.dest)
                 if len(parts) != len(batch):
                     self.log(
-                        "DeepL вернул неожиданное число строк ({0} вместо {1}) "
-                        "— пропускаю эту пачку.".format(len(parts), len(batch))
+                        tr("DeepL вернул неожиданное число строк ({0} вместо {1}) "
+                        "— пропускаю эту пачку.").format(len(parts), len(batch))
                     )
                     return
                 bad = [
@@ -219,10 +220,10 @@ class DeepLTranslator:
                     # (там перевод берётся через __call__, который сам делает
                     # запрос заново, если строки нет в кэше).
                     self.log(
-                        "DeepL повредил защищённый маркер (тег/подстановку) "
+                        tr("DeepL повредил защищённый маркер (тег/подстановку) "
                         "как минимум в одной строке из {0} — эта пачка не "
                         "кэшируется, строки будут переведены по одной "
-                        "позже.".format(len(batch))
+                        "позже.").format(len(batch))
                     )
                     if attempt < self.retries:
                         wait = min(1.0 * attempt, 5.0)
@@ -249,8 +250,8 @@ class DeepLTranslator:
                 wait = e.retry_after if e.retry_after else cooldown
                 wait = min(wait, self.MAX_COOLDOWN)
                 self.log(
-                    "DeepL ответил 'слишком много запросов'. Пауза {0:.0f} с "
-                    "(попытка {1}/{2})...".format(wait, attempt, self.retries)
+                    tr("DeepL ответил 'слишком много запросов'. Пауза {0:.0f} с "
+                    "(попытка {1}/{2})...").format(wait, attempt, self.retries)
                 )
                 time.sleep(wait)
                 cooldown = min(self.MAX_COOLDOWN, cooldown * 1.7)
@@ -263,13 +264,13 @@ class DeepLTranslator:
             except Exception as e:
                 wait = min(1.5 * attempt, 8.0)
                 self.log(
-                    "Ошибка сети при обращении к DeepL (попытка {0}/{1}): {2}. "
-                    "Повтор через {3:.1f} с.".format(attempt, self.retries, e, wait)
+                    tr("Ошибка сети при обращении к DeepL (попытка {0}/{1}): {2}. "
+                    "Повтор через {3:.1f} с.").format(attempt, self.retries, e, wait)
                 )
                 time.sleep(wait)
 
         self.stats["errors"] += len(batch)
         self.log(
-            "Не удалось перевести пачку из {0} строк через DeepL, оставляю "
-            "оригинал.".format(len(batch))
+            tr("Не удалось перевести пачку из {0} строк через DeepL, оставляю "
+            "оригинал.").format(len(batch))
         )

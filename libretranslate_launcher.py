@@ -20,11 +20,39 @@ LibreTranslate (адрес, ошибки загрузки моделей и т.�
 можно было остановить Ctrl+C, не закрывая саму программу перевода.
 """
 
+from i18n import tr
 import os
 import re
 import subprocess
 
-DEFAULT_LOAD_ONLY = ["en", "ru", "zh", "fr", "es"]
+import argos_packages
+
+# LibreTranslate построен на Argos Translate. Все его модели переводят либо
+# НА английский, либо С английского; между двумя неанглийскими языками
+# Argos сам переводит «через английский» (fr -> en -> ru), для чего нужны
+# обе модели и английский среди загруженных языков. Поэтому для пары
+# языков в --load-only нужны: исходный, целевой и (если ни один из них не
+# английский) "en". Больше ничего загружать не нужно.
+
+
+def libre_code(code):
+    """Код языка для LibreTranslate: китайский там "zh", а не "zh-CN"."""
+    code = (code or "").strip().lower()
+    return {"zh-cn": "zh"}.get(code, code)
+
+
+def languages_for_pair(src_code, dest_code):
+    """Минимальный набор языков для --load-only под пару src -> dest."""
+    s, d = libre_code(src_code), libre_code(dest_code)
+    result = [s]
+    if argos_packages.has_direct(s, d):
+        # Есть прямая модель (сейчас только pt <-> es) — английский не нужен.
+        return [s] if s == d else [s, d]
+    if "en" not in (s, d):
+        result.append("en")      # «опорный» язык для перевода через английский
+    if d not in result:
+        result.append(d)
+    return result
 
 _RE_VERSION_DIR = re.compile(r'^pythoncore-(\d+)\.(\d+)-(32|64)$')
 
@@ -37,8 +65,8 @@ def _local_app_data():
     path = os.environ.get("LocalAppData") or os.environ.get("LOCALAPPDATA")
     if not path:
         raise LibreTranslateLauncherError(
-            "Не удалось определить папку %LocalAppData% — переменная "
-            "окружения не задана (это не Windows?)."
+            tr("Не удалось определить папку %LocalAppData% — переменная "
+            "окружения не задана (это не Windows?).")
         )
     return path
 
@@ -54,10 +82,10 @@ def find_libretranslate_exe(python_root=None):
     root = python_root or os.path.join(_local_app_data(), "Python")
     if not os.path.isdir(root):
         raise LibreTranslateLauncherError(
-            "Папка {0} не найдена. Похоже, Python здесь не установлен "
+            tr("Папка {0} не найдена. Похоже, Python здесь не установлен "
             "через официальный установщик/Microsoft Store как "
             "'для этого пользователя', либо LibreTranslate не был "
-            "установлен командой 'pip install libretranslate'.".format(root)
+            "установлен командой 'pip install libretranslate'.").format(root)
         )
 
     candidates = []
@@ -72,17 +100,16 @@ def find_libretranslate_exe(python_root=None):
 
     if not candidates:
         raise LibreTranslateLauncherError(
-            "В папке {0} не нашлось ни одной версии Python с "
+            tr("В папке {0} не нашлось ни одной версии Python с "
             "установленным LibreTranslate (файл Scripts\\libretranslate.exe). "
-            "Установите его командой: pip install libretranslate".format(root)
+            "Установите его командой: pip install libretranslate").format(root)
         )
 
     candidates.sort(key=lambda item: item[0])
     return candidates[-1][1]
 
 
-def build_command(exe_path, languages=None):
-    languages = languages or DEFAULT_LOAD_ONLY
+def build_command(exe_path, languages):
     return [exe_path, "--load-only", ",".join(languages)]
 
 
@@ -91,10 +118,14 @@ def launch(python_root=None, languages=None, log=None):
     Не ждёт завершения (сервер работает, пока окно открыто) — функция
     возвращает сразу после запуска. Возвращает путь к найденному exe."""
     log = log or (lambda msg: None)
+    if not languages:
+        raise LibreTranslateLauncherError(
+            tr("Не указаны языки для загрузки (--load-only).")
+        )
     exe_path = find_libretranslate_exe(python_root)
     cmd = build_command(exe_path, languages)
-    log("Найден LibreTranslate: {0}".format(exe_path))
-    log("Запускаю: {0}".format(" ".join(cmd)))
+    log(tr("Найден LibreTranslate: {0}").format(exe_path))
+    log(tr("Запускаю: {0}").format(" ".join(cmd)))
     # CREATE_NEW_CONSOLE — отдельное окно консоли, не заблокированное
     # ожиданием (start /wait не нужен); работает только на Windows, но
     # весь этот модуль имеет смысл только на Windows.

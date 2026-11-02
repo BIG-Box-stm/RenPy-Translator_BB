@@ -1,0 +1,506 @@
+{
+ "_comment": "Снимок индекса пакетов Argos Translate (https://www.argosopentech.com/argospm/index/, https://raw.githubusercontent.com/argosopentech/argospm-index/main/index.json) на 2026-10-16. Ссылка на скачивание: https://argos-net.com/v1/translate-<из>_<в>-<версия с _ вместо .>.argosmodel. Программа при запуске пробует взять свежий индекс из интернета и использует этот файл, если не получилось.",
+ "link_template": "https://argos-net.com/v1/translate-{from}_{to}-{version_}.argosmodel",
+ "packages": [
+  {
+   "from": "sq",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "ar",
+   "to": "en",
+   "version": "1.0"
+  },
+  {
+   "from": "az",
+   "to": "en",
+   "version": "1.5"
+  },
+  {
+   "from": "eu",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "bn",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "bg",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "ca",
+   "to": "en",
+   "version": "1.7"
+  },
+  {
+   "from": "zt",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "zh",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "cs",
+   "to": "en",
+   "version": "1.9.6"
+  },
+  {
+   "from": "da",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "nl",
+   "to": "en",
+   "version": "1.8"
+  },
+  {
+   "from": "eo",
+   "to": "en",
+   "version": "1.5"
+  },
+  {
+   "from": "et",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "fi",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "fr",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "gl",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "de",
+   "to": "en",
+   "version": "1.3"
+  },
+  {
+   "from": "el",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "he",
+   "to": "en",
+   "version": "1.5"
+  },
+  {
+   "from": "hi",
+   "to": "en",
+   "version": "1.1"
+  },
+  {
+   "from": "hu",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "id",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "ga",
+   "to": "en",
+   "version": "1.1"
+  },
+  {
+   "from": "it",
+   "to": "en",
+   "version": "1.0"
+  },
+  {
+   "from": "ja",
+   "to": "en",
+   "version": "1.1"
+  },
+  {
+   "from": "ko",
+   "to": "en",
+   "version": "1.1"
+  },
+  {
+   "from": "ky",
+   "to": "en",
+   "version": "1.4"
+  },
+  {
+   "from": "lv",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "lt",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "ms",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "nb",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "fa",
+   "to": "en",
+   "version": "1.5"
+  },
+  {
+   "from": "pl",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "pb",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "pt",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "ro",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "ru",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "sk",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "sl",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "es",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "sw",
+   "to": "en",
+   "version": "1.11"
+  },
+  {
+   "from": "sv",
+   "to": "en",
+   "version": "1.5"
+  },
+  {
+   "from": "tl",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "th",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "tr",
+   "to": "en",
+   "version": "1.5"
+  },
+  {
+   "from": "uk",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "ur",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "vi",
+   "to": "en",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "sq",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "ar",
+   "version": "1.0"
+  },
+  {
+   "from": "en",
+   "to": "az",
+   "version": "1.5"
+  },
+  {
+   "from": "en",
+   "to": "eu",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "bn",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "bg",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "ca",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "zh",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "zt",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "cs",
+   "version": "1.9.6"
+  },
+  {
+   "from": "en",
+   "to": "da",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "nl",
+   "version": "1.8"
+  },
+  {
+   "from": "en",
+   "to": "eo",
+   "version": "1.5"
+  },
+  {
+   "from": "en",
+   "to": "et",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "fi",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "fr",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "gl",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "de",
+   "version": "1.3"
+  },
+  {
+   "from": "en",
+   "to": "el",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "he",
+   "version": "1.5"
+  },
+  {
+   "from": "en",
+   "to": "hi",
+   "version": "1.1"
+  },
+  {
+   "from": "en",
+   "to": "hu",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "id",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "ga",
+   "version": "1.1"
+  },
+  {
+   "from": "en",
+   "to": "it",
+   "version": "1.0"
+  },
+  {
+   "from": "en",
+   "to": "ja",
+   "version": "1.1"
+  },
+  {
+   "from": "en",
+   "to": "ko",
+   "version": "1.1"
+  },
+  {
+   "from": "en",
+   "to": "ky",
+   "version": "1.4"
+  },
+  {
+   "from": "en",
+   "to": "lv",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "lt",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "ms",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "nb",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "fa",
+   "version": "1.5"
+  },
+  {
+   "from": "en",
+   "to": "pl",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "pt",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "pb",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "ro",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "ru",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "sk",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "sl",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "es",
+   "version": "1.0"
+  },
+  {
+   "from": "en",
+   "to": "sw",
+   "version": "1.11"
+  },
+  {
+   "from": "en",
+   "to": "sv",
+   "version": "1.5"
+  },
+  {
+   "from": "en",
+   "to": "tl",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "th",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "tr",
+   "version": "1.5"
+  },
+  {
+   "from": "en",
+   "to": "uk",
+   "version": "1.4"
+  },
+  {
+   "from": "en",
+   "to": "ur",
+   "version": "1.9"
+  },
+  {
+   "from": "en",
+   "to": "vi",
+   "version": "1.9"
+  },
+  {
+   "from": "pt",
+   "to": "es",
+   "version": "1.0"
+  },
+  {
+   "from": "es",
+   "to": "pt",
+   "version": "1.0"
+  }
+ ]
+}

@@ -26,13 +26,13 @@
 окно программы показывает уведомление с просьбой добавить промпт в папку.
 """
 
+from i18n import tr
 import os
 import re
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 
 CONTEXT_FILE = "prompt_context.txt"
-DEFAULT_LABEL = "Промпт 1"
 
 # Английские названия языков для подстановки в промпт вместо {SRC_LANG} /
 # {DEST_LANG}. Ключи — коды из списка языков окна (в нижнем регистре).
@@ -84,15 +84,20 @@ def apply_languages(text, src_lang=None, dest_lang=None, log=None):
     has_placeholders = "{SRC_LANG}" in text or "{DEST_LANG}" in text
     if not has_placeholders and (src_name != "English" or dest_name != "Russian"):
         log(
-            "Внимание: в тексте промпта нет {{SRC_LANG}} / {{DEST_LANG}} — языки "
+            tr("Внимание: в тексте промпта нет {{SRC_LANG}} / {{DEST_LANG}} — языки "
             "({0} -> {1}), выбранные в окне, в него не подставляются. Если "
             "в промпте жёстко прописаны другие языки, перевод может "
-            "получиться не на тот язык.".format(src_name, dest_name)
+            "получиться не на тот язык.").format(src_name, dest_name)
         )
     return text.replace("{SRC_LANG}", src_name).replace("{DEST_LANG}", dest_name)
 
 
 _RE_NUMBERED = re.compile(r"^prompt_(\d+)$", re.IGNORECASE)
+
+
+def default_label():
+    """Подпись «Промпт 1» на языке интерфейса (значение списка по умолчанию)."""
+    return tr("Промпт {0}").format(1)
 
 
 def ensure_dir(log=None):
@@ -102,7 +107,7 @@ def ensure_dir(log=None):
     try:
         os.makedirs(PROMPTS_DIR, exist_ok=True)
     except Exception as e:
-        log("Не удалось создать папку промптов {0}: {1}".format(PROMPTS_DIR, e))
+        log(tr("Не удалось создать папку промптов {0}: {1}").format(PROMPTS_DIR, e))
 
 
 def list_prompts(log=None):
@@ -124,7 +129,7 @@ def list_prompts(log=None):
         stem = name[:-4]
         m = _RE_NUMBERED.match(stem)
         if m:
-            items.append(((0, int(m.group(1)), ""), "Промпт {0}".format(int(m.group(1))), name))
+            items.append(((0, int(m.group(1)), ""), tr("Промпт {0}").format(int(m.group(1))), name))
         else:
             items.append(((1, 0, stem.lower()), stem, name))
     items.sort(key=lambda it: it[0])
@@ -154,10 +159,10 @@ def load_file(filename, log=None, src_lang=None, dest_lang=None):
         with open(path, "r", encoding="utf-8-sig") as f:
             text = f.read().strip()
     except Exception as e:
-        log("Не удалось прочитать {0}: {1}.".format(path, e))
+        log(tr("Не удалось прочитать {0}: {1}.").format(path, e))
         return None
     if not text:
-        log("Файл {0} пуст.".format(filename))
+        log(tr("Файл {0} пуст.").format(filename))
         return None
     return apply_languages(text, src_lang, dest_lang, log)
 

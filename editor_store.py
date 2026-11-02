@@ -22,6 +22,7 @@
 Старые файлы без раздела "skip" читаются как есть.
 """
 
+from i18n import tr
 import json
 import os
 import re
@@ -150,26 +151,26 @@ def suspicious_reasons(orig, cur, speaker=None, known=None, dest_code=None):
     reasons = []
     problems = core.tag_problems(orig, cur)
     if problems:
-        reasons.append("теги/подстановки: " + "; ".join(problems))
+        reasons.append(tr("теги/подстановки: ") + "; ".join(problems))
     if any(m in cur for m in ("[CURRENT_SOURCE]", "[PREVIOUS_SOURCE]", "[PREVIOUS_TRANSLATION]")):
-        reasons.append("в переводе остался обрывок промпта")
+        reasons.append(tr("в переводе остался обрывок промпта"))
     stripped, learned = gemma4_translate.split_speaker(cur, speaker, orig, known) if speaker else (cur, None)
     if learned:
-        reasons.append("в начале осталось имя говорящего («{0}:»)".format(learned))
+        reasons.append(tr("в начале осталось имя говорящего («{0}:»)").format(learned))
     elif not speaker and ":" not in orig and "：" not in orig:
         if gemma4_translate._RE_NAME_PREFIX.match(cur):
-            reasons.append("возможно, в начале осталось имя говорящего")
+            reasons.append(tr("возможно, в начале осталось имя говорящего"))
     if (dest_code or "").lower() in NON_LATIN_DEST:
         text = core._RE_PROTECT.sub(" ", cur)
         latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
         letters = sum(1 for ch in text if ch.isalpha())
         if letters >= 4 and latin / letters > LATIN_SHARE:
-            reasons.append("почти весь перевод латиницей — возможно, не переведено")
+            reasons.append(tr("почти весь перевод латиницей — возможно, не переведено"))
     if len(orig) >= MIN_LEN_FOR_RATIO:
         if len(cur) > LONGER_RATIO * len(orig):
-            reasons.append("перевод намного длиннее оригинала")
+            reasons.append(tr("перевод намного длиннее оригинала"))
         elif len(cur) < SHORTER_RATIO * len(orig):
-            reasons.append("перевод намного короче оригинала (обрыв?)")
+            reasons.append(tr("перевод намного короче оригинала (обрыв?)"))
     return reasons
 
 
@@ -235,6 +236,7 @@ def scan(lang_dir, manual=None, skip=None, dest_code=None):
                 "orig": orig,
                 "cur": cur,
                 "untranslated": core._is_untranslated(entry, False, protected),
+                "raw_untranslated": core._is_untranslated(entry, False),
                 "manual": entry['key'] in file_manual,
                 "skip": entry['key'] in file_skip,
                 "suspicious": reasons,
@@ -249,12 +251,12 @@ def normalize(value):
     ошибке)."""
     value = value.strip()
     if not value:
-        return None, "Пустой перевод не применяется."
+        return None, tr("Пустой перевод не применяется.")
     if "\n" in value or "\r" in value:
-        return None, "Перевод должен быть в одну строку (перенос строки в игре — \\n)."
+        return None, tr("Перевод должен быть в одну строку (перенос строки в игре — \\n).")
     value = re.sub(r'(?<!\\)"', r'\\"', value)
     if core._ends_with_odd_backslash(value):
-        return None, "Строка не может заканчиваться одиночным \\ — он сломает кавычку."
+        return None, tr("Строка не может заканчиваться одиночным \\ — он сломает кавычку.")
     return value, None
 
 
@@ -284,7 +286,7 @@ def apply_edits(lang_dir, edits, log=None):
         try:
             lines = project.read_lines(path)
         except Exception as e:
-            log("  {0}: ОШИБКА чтения ({1})".format(rel, e))
+            log(tr("  {0}: ОШИБКА чтения ({1})").format(rel, e))
             continue
         out = list(lines)
         done = set()
@@ -295,12 +297,12 @@ def apply_edits(lang_dir, edits, log=None):
             _set_inner(out, entry, file_edits[key])
             done.add(key)
         if not done:
-            log("  {0}: строки не найдены (файл изменился?) — пропущено.".format(rel))
+            log(tr("  {0}: строки не найдены (файл изменился?) — пропущено.").format(rel))
             continue
         try:
             project.write_lines(path, out)
         except Exception as e:
-            log("  {0}: ОШИБКА записи ({1})".format(rel, e))
+            log(tr("  {0}: ОШИБКА записи ({1})").format(rel, e))
             continue
         manual.setdefault(rel, set()).update(done)
         if rel in skip:
@@ -324,7 +326,7 @@ def mark_skip(lang_dir, items, log=None):
         try:
             lines = project.read_lines(path)
         except Exception as e:
-            log("  {0}: ОШИБКА чтения ({1})".format(rel, e))
+            log(tr("  {0}: ОШИБКА чтения ({1})").format(rel, e))
             continue
         out = list(lines)
         found = set()
@@ -339,13 +341,13 @@ def mark_skip(lang_dir, items, log=None):
                 changed = True
             found.add(key)
         if not found:
-            log("  {0}: строки не найдены (файл изменился?) — пропущено.".format(rel))
+            log(tr("  {0}: строки не найдены (файл изменился?) — пропущено.").format(rel))
             continue
         if changed:
             try:
                 project.write_lines(path, out)
             except Exception as e:
-                log("  {0}: ОШИБКА записи ({1})".format(rel, e))
+                log(tr("  {0}: ОШИБКА записи ({1})").format(rel, e))
                 continue
         skip.setdefault(rel, set()).update(found)
         if rel in manual:
@@ -366,6 +368,39 @@ def unmark_skip(lang_dir, items):
         hit = have & set(keys)
         if hit:
             skip[rel] = have - hit
+            removed += len(hit)
+    _write_raw(lang_dir, manual, skip)
+    return removed
+
+
+def mark_confirmed(lang_dir, items, log=None):
+    """items: {rel: set(ключей)}. «Переведено корректно»: текст перевода не
+    меняется, но строка получает защиту как переведённая вручную (попадает в
+    «Правленные вручную», автоперевод её не трогает, из «Подозрительных» и
+    «Не переведённых» она уходит). Если строка была отмечена «Перевод не
+    требуется» — эта отметка снимается. Возвращает число строк."""
+    manual, skip = _read_raw(lang_dir)
+    count = 0
+    for rel, keys in items.items():
+        keys = set(keys)
+        manual.setdefault(rel, set()).update(keys)
+        if rel in skip:
+            skip[rel] -= keys
+        count += len(keys)
+    _write_raw(lang_dir, manual, skip)
+    return count
+
+
+def unmark_manual(lang_dir, items):
+    """items: {rel: set(ключей)}. Снимает защиту «переведено вручную /
+    корректно» (текст не меняется). Возвращает число снятых."""
+    manual, skip = _read_raw(lang_dir)
+    removed = 0
+    for rel, keys in items.items():
+        have = manual.get(rel, set())
+        hit = have & set(keys)
+        if hit:
+            manual[rel] = have - hit
             removed += len(hit)
     _write_raw(lang_dir, manual, skip)
     return removed

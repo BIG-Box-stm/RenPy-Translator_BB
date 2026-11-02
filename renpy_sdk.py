@@ -23,6 +23,7 @@
 конкретная игра, поэтому имя языка ей передаёт вызывающий код (GUI),
 а не этот модуль."""
 
+from i18n import tr
 import os
 import re
 import subprocess
@@ -167,9 +168,9 @@ def find_launcher(sdk_dir):
         if os.path.isfile(full):
             return full
     raise RenpySdkError(
-        "В указанной папке не найден исполняемый файл Ren'Py SDK "
+        tr("В указанной папке не найден исполняемый файл Ren'Py SDK "
         "(renpy.exe / renpy.sh). Проверьте, что это папка самого SDK "
-        "(например, 'renpy-8.х.х-sdk'), а не папка игры или проекта."
+        "(например, 'renpy-8.х.х-sdk'), а не папка игры или проекта.")
     )
 
 
@@ -187,7 +188,7 @@ def generate_translations(project_dir, sdk_dir, renpy_lang_name, log=None, timeo
     else:
         cmd = [launcher, project_dir, "translate", renpy_lang_name]
 
-    log("Запускаю Ren'Py SDK: {0}".format(" ".join(cmd)))
+    log(tr("Запускаю Ren'Py SDK: {0}").format(" ".join(cmd)))
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
@@ -201,9 +202,9 @@ def generate_translations(project_dir, sdk_dir, renpy_lang_name, log=None, timeo
     proc.wait(timeout=timeout)
     if proc.returncode != 0:
         raise RenpySdkError(
-            "Ren'Py SDK завершился с ошибкой (код {0}). Смотрите "
+            tr("Ren'Py SDK завершился с ошибкой (код {0}). Смотрите "
             "сообщения выше в журнале — обычно это неверно указанная "
-            "папка проекта/SDK либо несовместимая версия SDK.".format(proc.returncode),
+            "папка проекта/SDK либо несовместимая версия SDK.").format(proc.returncode),
             output_lines=output_lines,
         )
     return proc.returncode

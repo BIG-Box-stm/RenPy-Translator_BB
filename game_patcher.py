@@ -19,6 +19,7 @@
 Переносы строк (CRLF/LF) и кодировка файлов игры сохраняются как были.
 """
 
+from i18n import tr
 import os
 import re
 import shutil
@@ -60,17 +61,17 @@ def _find_one_font(bundle_dir, pattern, suffix_label):
                 matches.append(rel.replace(os.sep, "/"))
     if not matches:
         raise FontsNotFoundError(
-            "В папке {0} не найден файл шрифта с именем вида "
+            tr("В папке {0} не найден файл шрифта с именем вида "
             "\"*-{1}.ttf\" или \"*-{1}.otf\". Положите туда файл шрифта "
-            "с таким суффиксом в имени (например, \"MyFont-{1}.ttf\")."
+            "с таким суффиксом в имени (например, \"MyFont-{1}.ttf\").")
             .format(bundle_dir, suffix_label)
         )
     if len(matches) > 1:
         raise FontsNotFoundError(
-            "В папке {0} найдено сразу несколько файлов с суффиксом "
+            tr("В папке {0} найдено сразу несколько файлов с суффиксом "
             "\"-{1}\": {2}. Оставьте там только один такой файл — "
             "программа не может сама угадать, какой из них нужен "
-            "использовать.".format(bundle_dir, suffix_label, ", ".join(matches))
+            "использовать.").format(bundle_dir, suffix_label, ", ".join(matches))
         )
     return matches[0]
 
@@ -94,8 +95,8 @@ def find_light_font(bundle_dir):
         return None
     if len(matches) > 1:
         raise FontsNotFoundError(
-            "В папке {0} найдено сразу несколько файлов с суффиксом "
-            "\"-Light\": {1}. Оставьте там только один такой файл."
+            tr("В папке {0} найдено сразу несколько файлов с суффиксом "
+            "\"-Light\": {1}. Оставьте там только один такой файл.")
             .format(bundle_dir, ", ".join(matches))
         )
     return matches[0]
@@ -124,6 +125,14 @@ LANGUAGE_NAMES = {
     "hi": "Hindi",
     "id": "Indonesian",
     "vi": "Vietnamese",
+    "uk": "Ukrainian",
+    "de": "German",
+    "it": "Italian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "tr": "Turkish",
 }
 
 # Результаты правки текста файла.
@@ -409,9 +418,9 @@ def find_game_file(game_dir, filename):
         return None
     if len(matches) > 1:
         raise PatchTargetError(
-            "Найдено больше одного файла {0}: {1}. Программа не может "
+            tr("Найдено больше одного файла {0}: {1}. Программа не может "
             "сама угадать, какой из них настоящий — уберите лишний или "
-            "разберитесь вручную.".format(filename, ", ".join(matches))
+            "разберитесь вручную.").format(filename, ", ".join(matches))
         )
     return matches[0]
 
@@ -440,8 +449,8 @@ def backup_originals(game_dir, log=None):
     root = project_root_of(game_dir)
     zip_path = os.path.join(root, BACKUP_ZIP_NAME)
     if os.path.isfile(zip_path):
-        log("  Резервная копия уже есть ({0}) — не перезаписываю, в ней остаются "
-            "первоначальные файлы.".format(zip_path))
+        log(tr("  Резервная копия уже есть ({0}) — не перезаписываю, в ней остаются "
+            "первоначальные файлы.").format(zip_path))
         return "exists"
 
     files = []
@@ -449,12 +458,12 @@ def backup_originals(game_dir, log=None):
         try:
             path = find_game_file(game_dir, name)
         except PatchTargetError as e:
-            log("  Резервная копия: {0}".format(e))
+            log(tr("  Резервная копия: {0}").format(e))
             continue
         if path:
             files.append(path)
     if not files:
-        log("  Резервная копия: gui.rpy и screens.rpy не найдены — копировать нечего.")
+        log(tr("  Резервная копия: gui.rpy и screens.rpy не найдены — копировать нечего."))
         return "nothing"
 
     try:
@@ -465,7 +474,7 @@ def backup_originals(game_dir, log=None):
                 zf.write(path, arc)
                 arc_names.append(arc)
         readme = (
-            "Резервная копия файлов, которые изменила программа Universal RenPy "
+            tr("Резервная копия файлов, которые изменила программа Universal RenPy "
             "Translator\n"
             "Создана: {when}\n\n"
             "Архив: {zip_name} (лежит в корне игры)\n"
@@ -478,7 +487,7 @@ def backup_originals(game_dir, log=None):
             "2. Если рядом с этими файлами лежат одноимённые .rpyc "
             "(gui.rpyc, screens.rpyc) — удалите их: Ren'Py пересоберёт их сам.\n\n"
             "Архив создаётся один раз, до первой правки, и больше не "
-            "перезаписывается.\n"
+            "перезаписывается.\n")
         ).format(
             when=time.strftime("%Y-%m-%d %H:%M:%S"),
             zip_name=BACKUP_ZIP_NAME,
@@ -488,9 +497,9 @@ def backup_originals(game_dir, log=None):
         with open(os.path.join(root, BACKUP_README_NAME), "w", encoding="utf-8-sig") as f:
             f.write(readme)
     except Exception as e:
-        log("  ОШИБКА создания резервной копии: {0}".format(e))
+        log(tr("  ОШИБКА создания резервной копии: {0}").format(e))
         return "error"
-    log("  Резервная копия создана: {0} (инструкция по откату: {1}).".format(
+    log(tr("  Резервная копия создана: {0} (инструкция по откату: {1}).").format(
         zip_path, BACKUP_README_NAME))
     return "created"
 
@@ -511,74 +520,74 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
     except FontsNotFoundError as e:
         log(str(e))
         return result
-    log("Найдена пара шрифтов: {0} / {1}.".format(regular_font, bold_font))
+    log(tr("Найдена пара шрифтов: {0} / {1}.").format(regular_font, bold_font))
 
     # --- 0б. резервная копия gui.rpy / screens.rpy (до любых правок) -----
-    log("Резервная копия gui.rpy и screens.rpy...")
+    log(tr("Резервная копия gui.rpy и screens.rpy..."))
     backup_originals(game_dir, log=log)
 
     # --- 1. шрифты -----------------------------------------------------
-    log("1/3. Копирую шрифты в папку игры...")
+    log(tr("1/3. Копирую шрифты в папку игры..."))
     try:
         count = copy_bundle(bundle_dir, game_dir, log=log)
     except Exception as e:
-        log("  ОШИБКА копирования: {0}".format(e))
+        log(tr("  ОШИБКА копирования: {0}").format(e))
         return result
-    log("  Скопировано файлов: {0} (в {1}).".format(count, game_dir))
+    log(tr("  Скопировано файлов: {0} (в {1}).").format(count, game_dir))
     missing = missing_fonts(game_dir, regular_font, bold_font)
     if missing:
         log(
-            "  ОШИБКА: после копирования в игре нет шрифтов, на которые "
+            tr("  ОШИБКА: после копирования в игре нет шрифтов, на которые "
             "должен ссылаться gui.rpy: {0}. Дальше не иду, чтобы не "
-            "сломать игру ссылкой на несуществующий шрифт.".format(", ".join(missing))
+            "сломать игру ссылкой на несуществующий шрифт.").format(", ".join(missing))
         )
         return result
     result["fonts"] = "done"
 
     # --- 2. gui.rpy ------------------------------------------------------
-    log("2/3. Подключаю шрифты в gui.rpy (язык: {0})...".format(lang))
+    log(tr("2/3. Подключаю шрифты в gui.rpy (язык: {0})...").format(lang))
     try:
         gui_path = find_game_file(game_dir, "gui.rpy")
     except PatchTargetError as e:
-        log("  ОШИБКА: {0}".format(e))
+        log(tr("  ОШИБКА: {0}").format(e))
         gui_path = None
         result["gui"] = "error"
     if gui_path is None and result.get("gui") != "error":
         log(
-            "  gui.rpy не найден нигде в папке game — шаг пропущен. Если у "
+            tr("  gui.rpy не найден нигде в папке game — шаг пропущен. Если у "
             "игры остался только gui.rpyc, сначала нажмите «Подготовить "
-            "игру»."
+            "игру».")
         )
     elif gui_path is not None:
         try:
             status, new_text = patch_gui_text(read_text(gui_path), lang, regular_font, bold_font)
             if status == ALREADY:
                 log(
-                    "  В gui.rpy уже есть блок «translate {0} python:» — "
-                    "шаг пропущен, файл не менялся.".format(lang)
+                    tr("  В gui.rpy уже есть блок «translate {0} python:» — "
+                    "шаг пропущен, файл не менялся.").format(lang)
                 )
                 result["gui"] = "already"
             else:
                 write_text(gui_path, new_text)
-                log("  В конец gui.rpy добавлен блок «translate {0} python:».".format(lang))
+                log(tr("  В конец gui.rpy добавлен блок «translate {0} python:».").format(lang))
                 result["gui"] = "done"
         except Exception as e:
-            log("  ОШИБКА при правке gui.rpy: {0}".format(e))
+            log(tr("  ОШИБКА при правке gui.rpy: {0}").format(e))
             result["gui"] = "error"
 
     # --- 3. screens.rpy ----------------------------------------------------
-    log("3/3. Добавляю выбор языка в настройки (screens.rpy)...")
+    log(tr("3/3. Добавляю выбор языка в настройки (screens.rpy)..."))
     try:
         screens_path = find_game_file(game_dir, "screens.rpy")
     except PatchTargetError as e:
-        log("  ОШИБКА: {0}".format(e))
+        log(tr("  ОШИБКА: {0}").format(e))
         screens_path = None
         result["screens"] = "error"
     if screens_path is None and result.get("screens") != "error":
         log(
-            "  screens.rpy не найден нигде в папке game — шаг пропущен. "
+            tr("  screens.rpy не найден нигде в папке game — шаг пропущен. "
             "Если у игры остался только screens.rpyc, сначала нажмите "
-            "«Подготовить игру»."
+            "«Подготовить игру».")
         )
     elif screens_path is not None:
         try:
@@ -586,37 +595,37 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
             if status == DONE_APPENDED:
                 write_text(screens_path, payload)
                 log(
-                    "  В screen preferences() уже был свой список языков — "
-                    "в него добавлена кнопка «{0}».".format(name)
+                    tr("  В screen preferences() уже был свой список языков — "
+                    "в него добавлена кнопка «{0}».").format(name)
                 )
                 result["screens"] = "done"
             elif status == DONE:
                 write_text(screens_path, payload)
                 log(
-                    "  В screen preferences() добавлен новый блок выбора "
-                    "языка (кнопка «{0}»).".format(name)
+                    tr("  В screen preferences() добавлен новый блок выбора "
+                    "языка (кнопка «{0}»).").format(name)
                 )
                 result["screens"] = "done"
             elif status == ALREADY:
                 log(
-                    "  В screens.rpy уже есть выбор этого языка ({0}) — "
-                    "шаг пропущен, файл не менялся.".format(payload)
+                    tr("  В screens.rpy уже есть выбор этого языка ({0}) — "
+                    "шаг пропущен, файл не менялся.").format(payload)
                 )
                 result["screens"] = "already"
             elif status == NO_SCREEN:
                 log(
-                    "  В screens.rpy не найден screen preferences() — шаг "
+                    tr("  В screens.rpy не найден screen preferences() — шаг "
                     "пропущен, файл не менялся. Добавьте блок выбора языка "
-                    "в меню настроек вручную."
+                    "в меню настроек вручную.")
                 )
             else:  # NO_ANCHOR
                 log(
-                    "  В screen preferences() нет вообще ни одного vbox: — "
+                    tr("  В screen preferences() нет вообще ни одного vbox: — "
                     "не знаю, куда вставлять, шаг пропущен, файл не "
-                    "менялся. Добавьте блок выбора языка вручную."
+                    "менялся. Добавьте блок выбора языка вручную.")
                 )
         except Exception as e:
-            log("  ОШИБКА при правке screens.rpy: {0}".format(e))
+            log(tr("  ОШИБКА при правке screens.rpy: {0}").format(e))
             result["screens"] = "error"
 
     return result

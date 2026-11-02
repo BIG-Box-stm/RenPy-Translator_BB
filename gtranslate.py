@@ -8,6 +8,7 @@
 отвечать "429 Too Many Requests".
 """
 
+from i18n import tr
 import json
 import random
 import re
@@ -168,9 +169,9 @@ class CachedTranslator:
                     # нельзя: закэшированная порча будет "залипать"
                     # навсегда. Пробуем ещё раз как обычную неудачу.
                     self.log(
-                        "Перевод повредил защищённый маркер (тег/подстановку) "
+                        tr("Перевод повредил защищённый маркер (тег/подстановку) "
                         "— не сохраняю в кэш, пробую ещё раз "
-                        "(попытка {0}/{1})...".format(attempt, self.retries)
+                        "(попытка {0}/{1})...").format(attempt, self.retries)
                     )
                     time.sleep(min(1.0 * attempt, 5.0))
                     continue
@@ -189,9 +190,9 @@ class CachedTranslator:
                 wait = e.retry_after if e.retry_after else cooldown
                 wait = min(wait, self.MAX_COOLDOWN)
                 self.log(
-                    "Google Translate ответил '429 Too Many Requests' "
+                    tr("Google Translate ответил '429 Too Many Requests' "
                     "(слишком много запросов). Делаю паузу {0:.0f} с и "
-                    "замедляю дальнейшие запросы (попытка {1}/{2})..."
+                    "замедляю дальнейшие запросы (попытка {1}/{2})...")
                     .format(wait, attempt, self.retries)
                 )
                 time.sleep(wait)
@@ -200,13 +201,13 @@ class CachedTranslator:
             except Exception as e:  # сеть нестабильна и т.п.
                 wait = min(1.5 * attempt, 8.0)
                 self.log(
-                    "Ошибка перевода (попытка {0}/{1}): {2}. Повтор через {3:.1f} с."
+                    tr("Ошибка перевода (попытка {0}/{1}): {2}. Повтор через {3:.1f} с.")
                     .format(attempt, self.retries, e, wait)
                 )
                 time.sleep(wait)
 
         self.stats["errors"] += 1
-        self.log("Не удалось перевести строку, оставляю оригинал: {0!r}".format(text[:60]))
+        self.log(tr("Не удалось перевести строку, оставляю оригинал: {0!r}").format(text[:60]))
         return None
 
     # ------------------------------------------------------------------
@@ -266,10 +267,10 @@ class CachedTranslator:
                 ]
                 if bad:
                     self.log(
-                        "Пакетный перевод повредил защищённый маркер "
+                        tr("Пакетный перевод повредил защищённый маркер "
                         "(тег/подстановку) как минимум в одной строке из {0} — "
                         "перевожу эту пачку по одной строке, чтобы не "
-                        "закэшировать испорченный результат.".format(len(batch))
+                        "закэшировать испорченный результат.").format(len(batch))
                     )
                     return False
                 for src_text, translated in zip(batch, parts):
@@ -287,9 +288,9 @@ class CachedTranslator:
 
             except BatchMismatch as e:
                 self.log(
-                    "Пакетный перевод не совпал по количеству строк "
+                    tr("Пакетный перевод не совпал по количеству строк "
                     "({0} вместо {1}) — перевожу эту пачку по одной "
-                    "строке, чтобы не перепутать реплики.".format(e.got, e.expected)
+                    "строке, чтобы не перепутать реплики.").format(e.got, e.expected)
                 )
                 return False
 
@@ -299,9 +300,9 @@ class CachedTranslator:
                 wait = e.retry_after if e.retry_after else cooldown
                 wait = min(wait, self.MAX_COOLDOWN)
                 self.log(
-                    "Google Translate ответил '429 Too Many Requests' при "
+                    tr("Google Translate ответил '429 Too Many Requests' при "
                     "пакетном переводе ({0} строк). Пауза {1:.0f} с "
-                    "(попытка {2}/{3})...".format(len(batch), wait, attempt, self.retries)
+                    "(попытка {2}/{3})...").format(len(batch), wait, attempt, self.retries)
                 )
                 time.sleep(wait)
                 cooldown = min(self.MAX_COOLDOWN, cooldown * 1.7)
@@ -309,13 +310,13 @@ class CachedTranslator:
             except Exception as e:
                 wait = min(1.5 * attempt, 8.0)
                 self.log(
-                    "Ошибка пакетного перевода (попытка {0}/{1}): {2}. "
-                    "Повтор через {3:.1f} с.".format(attempt, self.retries, e, wait)
+                    tr("Ошибка пакетного перевода (попытка {0}/{1}): {2}. "
+                    "Повтор через {3:.1f} с.").format(attempt, self.retries, e, wait)
                 )
                 time.sleep(wait)
 
         self.log(
-            "Не удалось перевести пачку из {0} строк одним запросом — "
-            "перевожу по одной.".format(len(batch))
+            tr("Не удалось перевести пачку из {0} строк одним запросом — "
+            "перевожу по одной.").format(len(batch))
         )
         return False

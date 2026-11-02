@@ -16,6 +16,7 @@ Gemma 4 (gemma-4-12B-it-qat-UD-Q4_K_XL.gguf от unsloth).
 gemma_launcher.launch().
 """
 
+from i18n import tr
 import json
 import re
 import threading
@@ -30,6 +31,7 @@ DEFAULT_NGL = 99
 DEFAULT_NP = 1
 DEFAULT_CTX = 2048
 DEFAULT_N_PREDICT = 256
+DEFAULT_MTP = 0      # предлагаемых токенов MTP (0 — без MTP)
 
 EXTRA_SERVER_ARGS = ["--jinja", "--reasoning", "off"]
 
@@ -117,15 +119,15 @@ def raw_translate(base_url, system_prompt, text, max_tokens=DEFAULT_N_PREDICT, t
         raise Gemma4Error("HTTP {0}: {1}".format(e.code, body_text[:300]))
     except urllib.error.URLError as e:
         raise Gemma4ConnectionError(
-            "Не удалось подключиться к Gemma 4 по адресу {0} ({1}). "
+            tr("Не удалось подключиться к Gemma 4 по адресу {0} ({1}). "
             "Убедитесь, что сервер запущен (кнопка «Запустить Gemma 4») и "
-            "адрес указан верно.".format(url, e.reason)
+            "адрес указан верно.").format(url, e.reason)
         )
     try:
         data = json.loads(raw)
         text_out = data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        raise Gemma4Error("Неожиданный ответ сервера: {0}".format(e))
+        raise Gemma4Error(tr("Неожиданный ответ сервера: {0}").format(e))
     if not return_info:
         return text_out
     info = {
@@ -156,6 +158,10 @@ class Gemma4Translator:
         self._fatal_error = None
         self._failed = set()   # строки, которые уже безуспешно пробовали в warm_batch()
         self._lock = threading.Lock()
+        # Сколько токенов сервер сгенерировал за всё время (по полю usage ответов,
+        # в том числе в отбракованных попытках) — для скорости «tok/s» в журнале.
+        self.tokens_total = 0
+        self._tok_lock = threading.Lock()
         # Режим "с именем говорящего": ключ запроса "Имя: текст" ->
         # (имя, текст). Заполняется через key_for() до начала перевода.
         self._parts = {}
@@ -185,15 +191,15 @@ class Gemma4Translator:
 
     def _bad_reason(self, source, result):
         if not result:
-            return "пустой ответ"
+            return tr("пустой ответ")
         if "\n" in result or "\r" in result:
-            return "перенос строки в ответе"
+            return tr("перенос строки в ответе")
         if not core.tokens_preserved(source, result):
-            return "потеряны или повреждены теги/подстановки"
+            return tr("потеряны или повреждены теги/подстановки")
         if core.markers_collapsed(source, result):
-            return "теги слиплись, текст между ними пропал"
+            return tr("теги слиплись, текст между ними пропал")
         if core.looks_truncated(source, result):
-            return "потерян текст за пределами тегов"
+            return tr("потерян текст за пределами тегов")
         return None
 
     def _attempt(self, request):
@@ -204,13 +210,16 @@ class Gemma4Translator:
             if self._inactive():
                 return None
             try:
-                result = raw_translate(self.base_url, self.system_prompt, request, self.max_tokens)
+                result, info = raw_translate(
+                    self.base_url, self.system_prompt, request, self.max_tokens, return_info=True)
+                with self._tok_lock:
+                    self.tokens_total += info.get("completion_tokens") or 0
             except Gemma4ConnectionError as e:
                 self._fatal_error = e
                 self.log(str(e))
                 return None
             except Gemma4Error as e:
-                self.log("Ошибка Gemma 4 (попытка {0}/{1}): {2}.".format(attempt, self.retries, e))
+                self.log(tr("Ошибка Gemma 4 (попытка {0}/{1}): {2}.").format(attempt, self.retries, e))
                 continue
             result, learned = split_speaker(result, speaker, text, self._known.get(speaker))
             if learned:
@@ -218,8 +227,8 @@ class Gemma4Translator:
             reason = self._bad_reason(text, result)
             if reason:
                 self.log(
-                    "Gemma 4 вернула непригодный ответ ({0}) — повторяю "
-                    "(попытка {1}/{2})...".format(reason, attempt, self.retries)
+                    tr("Gemma 4 вернула непригодный ответ ({0}) — повторяю "
+                    "(попытка {1}/{2})...").format(reason, attempt, self.retries)
                 )
                 continue
             return result

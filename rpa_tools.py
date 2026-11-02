@@ -15,6 +15,7 @@
 {имя_файла: [(смещение, длина[, префикс]), ...]}.
 """
 
+from i18n import tr
 import os
 import pickle
 import zlib
@@ -86,7 +87,7 @@ def extract_rpa(path, out_dir, log=None):
             with open(out_path, "wb") as out:
                 out.write(data)
             count += 1
-        log("  {0}: {1}, файлов внутри — {2}".format(os.path.basename(path), version, count))
+        log(tr("  {0}: {1}, файлов внутри — {2}").format(os.path.basename(path), version, count))
         return count
 
 
@@ -107,12 +108,12 @@ def extract_all(game_dir, log=None):
     log = log or (lambda msg: None)
     archives = find_rpa_files(game_dir)
     if not archives:
-        log("Архивов .rpa не найдено — возможно, игра уже распакована.")
+        log(tr("Архивов .rpa не найдено — возможно, игра уже распакована."))
         return 0, 0
     total_files = 0
     for path in archives:
         try:
             total_files += extract_rpa(path, game_dir, log=log)
         except Exception as e:
-            log("  ОШИБКА распаковки {0}: {1}".format(os.path.basename(path), e))
+            log(tr("  ОШИБКА распаковки {0}: {1}").format(os.path.basename(path), e))
     return len(archives), total_files

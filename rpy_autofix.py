@@ -50,6 +50,7 @@ Ren'Py SDK. Когда он падает при команде "translate", он
 случаями — см. apply_fix_at_line().
 """
 
+from i18n import tr
 import re
 
 _RE_UNESCAPED_QUOTE = re.compile(r'(?<!\\)"')
@@ -134,7 +135,7 @@ def apply_fix_at_line(lines, line_no):
             new_lines = list(lines)
             new_code = code[:-1].rstrip()
             new_lines[idx] = new_code + eol
-            return new_lines, "убрано висящее двоеточие без блока — было: {0!r}".format(code.strip())
+            return new_lines, tr("убрано висящее двоеточие без блока — было: {0!r}").format(code.strip())
 
     # --- Правило 2: аргумент без значения (закомментирован unrpyc) ------
     m = _RE_DANGLING_KEYWORD.search(stripped)
@@ -144,7 +145,7 @@ def apply_fix_at_line(lines, line_no):
         new_lines = list(lines)
         new_lines[idx] = new_code + eol
         return new_lines, (
-            "убран лишний \"#\" сразу после ключевого слова \"{0}\" — было: {1!r}"
+            tr("убран лишний \"#\" сразу после ключевого слова \"{0}\" — было: {1!r}")
             .format(m.group(1), stripped.strip())
         )
 

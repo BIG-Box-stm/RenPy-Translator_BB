@@ -19,6 +19,7 @@ Translation API» -> «Credentials» -> «API key» (для API нужен по�
 (вызываемый объект + .stats + .stop() + .warm_batch()).
 """
 
+from i18n import tr
 import json
 import random
 import time
@@ -79,13 +80,13 @@ def raw_translate_batch(texts, api_key, src, dest, timeout=30):
             raise RateLimited(retry_after)
         if e.code in (400, 401, 403):
             raise GoogleApiError(
-                "Google Cloud Translation отклонил запрос (HTTP {0}): {1}. "
+                tr("Google Cloud Translation отклонил запрос (HTTP {0}): {1}. "
                 "Проверьте, что ключ скопирован полностью, что в проекте "
                 "включён «Cloud Translation API» и подключён платёжный "
-                "аккаунт, а ключ не ограничен другим API."
+                "аккаунт, а ключ не ограничен другим API.")
                 .format(e.code, message)
             )
-        raise GoogleApiError("Ошибка Google Cloud Translation (HTTP {0}): {1}".format(e.code, message))
+        raise GoogleApiError(tr("Ошибка Google Cloud Translation (HTTP {0}): {1}").format(e.code, message))
     data = json.loads(raw)
     items = data["data"]["translations"]
     return [item["translatedText"] for item in items]
@@ -172,8 +173,8 @@ class GoogleApiTranslator:
                 parts = raw_translate_batch(batch, self.api_key, self.src, self.dest)
                 if len(parts) != len(batch):
                     self.log(
-                        "Google API вернул неожиданное число строк ({0} вместо "
-                        "{1}) — пропускаю эту пачку.".format(len(parts), len(batch))
+                        tr("Google API вернул неожиданное число строк ({0} вместо "
+                        "{1}) — пропускаю эту пачку.").format(len(parts), len(batch))
                     )
                     return
                 bad = [
@@ -185,9 +186,9 @@ class GoogleApiTranslator:
                     # "залипала" бы навсегда). Строки получат новый шанс по
                     # одной в process_lines().
                     self.log(
-                        "Google API повредил защищённый маркер (тег/подстановку) "
+                        tr("Google API повредил защищённый маркер (тег/подстановку) "
                         "как минимум в одной строке из {0} — эта пачка не "
-                        "кэшируется.".format(len(batch))
+                        "кэшируется.").format(len(batch))
                     )
                     if attempt < self.retries:
                         time.sleep(min(1.0 * attempt, 5.0))
@@ -212,8 +213,8 @@ class GoogleApiTranslator:
                 self._note_rate_limit()
                 wait = min(e.retry_after if e.retry_after else cooldown, self.MAX_COOLDOWN)
                 self.log(
-                    "Google API ответил 'слишком много запросов'. Пауза {0:.0f} с "
-                    "(попытка {1}/{2})...".format(wait, attempt, self.retries)
+                    tr("Google API ответил 'слишком много запросов'. Пауза {0:.0f} с "
+                    "(попытка {1}/{2})...").format(wait, attempt, self.retries)
                 )
                 time.sleep(wait)
                 cooldown = min(self.MAX_COOLDOWN, cooldown * 1.7)
@@ -226,13 +227,13 @@ class GoogleApiTranslator:
             except Exception as e:
                 wait = min(1.5 * attempt, 8.0)
                 self.log(
-                    "Ошибка сети при обращении к Google API (попытка {0}/{1}): "
-                    "{2}. Повтор через {3:.1f} с.".format(attempt, self.retries, e, wait)
+                    tr("Ошибка сети при обращении к Google API (попытка {0}/{1}): "
+                    "{2}. Повтор через {3:.1f} с.").format(attempt, self.retries, e, wait)
                 )
                 time.sleep(wait)
 
         self.stats["errors"] += len(batch)
         self.log(
-            "Не удалось перевести пачку из {0} строк через Google API, "
-            "оставляю оригинал.".format(len(batch))
+            tr("Не удалось перевести пачку из {0} строк через Google API, "
+            "оставляю оригинал.").format(len(batch))
         )

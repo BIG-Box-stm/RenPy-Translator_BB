@@ -20,7 +20,8 @@
 без окна Tkinter.
 """
 
-LABEL = "Времени до завершения: "
+from i18n import tr
+
 MIN_ITEMS = 3
 MIN_SECONDS = 3.0
 
@@ -41,6 +42,6 @@ def eta_text(done, total, elapsed):
     if total <= 0 or done >= total:
         return ""
     if done < MIN_ITEMS or elapsed < MIN_SECONDS:
-        return LABEL + "считаю..."
+        return tr("Времени до завершения: ") + tr("считаю...")
     remaining = (total - done) * (elapsed / done)
-    return LABEL + format_duration(remaining)
+    return tr("Времени до завершения: ") + format_duration(remaining)
