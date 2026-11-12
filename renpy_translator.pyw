@@ -57,6 +57,7 @@ import prompts
 import renpy_sdk
 import rpa_tools
 import rpy_autofix
+import setup_wizard
 import translate_gemma
 import ui_editor
 import unrpyc_manager
@@ -229,6 +230,9 @@ class App(tk.Tk):
         self.fonts_bundle_dir = os.path.join(self.script_dir, "game")
         self.settings_path = os.path.join(self.script_dir, "_translator_settings.json")
         self.settings = project.load_settings(self.settings_path)
+        # Самый первый запуск (файла настроек ещё нет): откроется «Мастер установки».
+        self._first_run = not self.settings
+        self._wizard = None
         # Язык интерфейса: сохранённый; при самом первом запуске (настроек ещё
         # нет) — язык системы; у старых установок без этой настройки — русский.
         if "ui_language" in self.settings:
@@ -315,6 +319,8 @@ class App(tk.Tk):
         self._on_engine_changed()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll_queue)
+        if self._first_run:
+            self.after(700, lambda: self._open_wizard(auto=True))
 
     # ------------------------------------------------------------------
     # UI
@@ -352,6 +358,12 @@ class App(tk.Tk):
             header_row,
             text="Language / Язык / 语言 / Idioma:"
         ).pack(side="right", padx=(0, 6))
+
+        # Кнопка мастера установки — посередине верхней строки.
+        self.wizard_btn = ttk.Button(
+            header_row, text=tr("Мастер установки"), command=self._open_wizard
+        )
+        self.wizard_btn.pack(side="left", expand=True)
 
         # Строка выбора папки
         row = ttk.Frame(frame_top)
@@ -702,6 +714,59 @@ class App(tk.Tk):
             ttk.Entry(row_mtp, textvariable=mtp_var, width=6).pack(side="left", padx=(6, 18))
             ttk.Label(row_mtp, text=hint).pack(side="left")
         return group
+
+    # ------------------------------------------------------------------
+    # Мастер установки (setup_wizard.py)
+    # ------------------------------------------------------------------
+    def _open_wizard(self, auto=False):
+        w = getattr(self, "_wizard", None)
+        try:
+            if w is not None and w.winfo_exists():
+                w.lift()
+                w.focus_force()
+                return
+        except Exception:
+            pass
+        self._wizard = setup_wizard.SetupWizard(
+            self, self.script_dir, self.settings, on_apply=self._wizard_apply,
+            log=None, auto=auto,
+        )
+
+    def _wizard_busy(self):
+        w = getattr(self, "_wizard", None)
+        try:
+            return bool(w is not None and w.winfo_exists() and w.busy)
+        except Exception:
+            return False
+
+    def _wizard_apply(self, updates):
+        """Мастер сообщает пути и значения запуска: записываем их в поля окна
+        и настройки. Числовые поля заполняются только если они пустые —
+        свои настроенные значения мастер не перетирает."""
+        if updates.get("llama_folder"):
+            self.gemma_llama_folder_var.set(updates["llama_folder"])
+            self.settings["gemma_llama_folder"] = updates["llama_folder"]
+        if updates.get("tg_model"):
+            self.gemma_model_path_var.set(updates["tg_model"])
+            self.settings["gemma_model_path"] = updates["tg_model"]
+        if updates.get("g4_model"):
+            self.gemma4_model_path_var.set(updates["g4_model"])
+            self.settings["gemma4_model_path"] = updates["g4_model"]
+        for model, mtp_name in (updates.get("mtp_choices") or {}).items():
+            self.settings.setdefault("mtp_choices", {})[model] = mtp_name
+        groups = {
+            "tg": (self.gemma_ngl_var, self.gemma_np_var, self.gemma_ctx_var, self.gemma_mtp_var),
+            "g4": (self.gemma4_ngl_var, self.gemma4_np_var, self.gemma4_ctx_var, self.gemma4_mtp_var),
+        }
+        for group, values in (updates.get("defaults") or {}).items():
+            for var, value in zip(groups[group], values):
+                if not var.get().strip():
+                    var.set(str(value))
+        if updates.get("engine"):
+            self.engine_var.set(engine_display(updates["engine"]))
+            self._on_engine_changed()
+        self.settings["wizard_done"] = True
+        self._save_settings()
 
     def _choose_folder(self):
         path = filedialog.askdirectory(title=tr("Выберите папку игры"))
@@ -1670,6 +1735,13 @@ class App(tk.Tk):
             return
         # Состояние снимаем ДО смены языка: значения полей ещё показаны на старом
         # языке, и только так их можно правильно превратить в коды.
+        if self._wizard_busy():
+            messagebox.showinfo(
+                tr("Мастер установки"),
+                tr("Язык интерфейса нельзя сменить во время установки в мастере. Дождитесь "
+                   "окончания или отмените установку."))
+            self.ui_lang_var.set(self._ui_lang_name(i18n.get_language()))
+            return
         state = self._capture_ui_state()
         i18n.set_language(code)
         self._rebuild_ui(state)

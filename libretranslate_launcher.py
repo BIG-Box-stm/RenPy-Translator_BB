@@ -24,6 +24,7 @@ from i18n import tr
 import os
 import re
 import subprocess
+import sys
 
 import argos_packages
 
@@ -71,6 +72,29 @@ def _local_app_data():
     return path
 
 
+def _exe_of_current_python():
+    """libretranslate.exe в Scripts того Python, которым запущена сама
+    программа (в том числе Python с python.org, который ставит мастер
+    установки: он лежит в %LocalAppData%\\Programs\\Python, а не в
+    %LocalAppData%\\Python\\pythoncore-*), либо в пользовательской папке
+    Scripts (pip install --user)."""
+    candidates = [os.path.join(os.path.dirname(sys.executable), "Scripts", "libretranslate.exe")]
+    try:
+        import sysconfig
+        candidates.append(os.path.join(sysconfig.get_path("scripts") or "", "libretranslate.exe"))
+        for scheme in ("nt_user", "posix_user"):
+            try:
+                candidates.append(os.path.join(sysconfig.get_path("scripts", scheme) or "", "libretranslate.exe"))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
 def find_libretranslate_exe(python_root=None):
     """Ищет libretranslate.exe в самой свежей версии Python, найденной
     под %LocalAppData%\\Python\\pythoncore-<версия>-<разрядность>\\Scripts.
@@ -79,6 +103,11 @@ def find_libretranslate_exe(python_root=None):
     32-битной при равной версии. Возвращает полный путь к exe.
     Бросает LibreTranslateLauncherError с понятным текстом, если ничего
     не нашлось."""
+    if python_root is None:
+        own = _exe_of_current_python()
+        if own:
+            return own
+
     root = python_root or os.path.join(_local_app_data(), "Python")
     if not os.path.isdir(root):
         raise LibreTranslateLauncherError(

@@ -13,7 +13,9 @@ lang/es.json, lang/pt.json (русский — язык «по умолчани�
 Как добавить или поправить перевод: откройте lang/<код>.json в любом
 текстовом редакторе, впишите перевод справа от нужной строки (части вида
 {0}, {1}, \n и «кавычки» оставляйте как есть) и перезапустите программу
-(или переключите язык в окне ещё раз). Как добавить новый язык: создайте
+(или переключите язык в окне ещё раз). Дополнительные файлы lang/<код>.<имя>.json (например en.wizard.json)
+подгружаются вместе с основным — так новые переводы можно добавлять, не трогая
+основной файл. Как добавить новый язык: создайте
 lang/<код>.json (скопируйте en.json и переведите значения) и добавьте язык в
 UI_LANGUAGES ниже.
 
@@ -70,14 +72,29 @@ def detect_system_language():
     return "en"
 
 
-def _load_table(code):
-    path = os.path.join(LANG_DIR, code + ".json")
+def _read_json_table(path):
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except Exception:
         return {}
     return {k: v for k, v in data.items() if isinstance(v, str) and v.strip()}
+
+
+def _load_table(code):
+    """Основной файл lang/<код>.json плюс необязательные дополнительные
+    lang/<код>.<имя>.json (например en.wizard.json — переводы «Мастера
+    установки»). Если ключ есть и там и там, главным считается основной файл."""
+    table = {}
+    try:
+        names = sorted(os.listdir(LANG_DIR))
+    except Exception:
+        names = []
+    for name in names:
+        if name.startswith(code + ".") and name.endswith(".json") and name != code + ".json":
+            table.update(_read_json_table(os.path.join(LANG_DIR, name)))
+    table.update(_read_json_table(os.path.join(LANG_DIR, code + ".json")))
+    return table
 
 
 def set_language(code):
