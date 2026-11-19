@@ -26,6 +26,9 @@ import time
 import urllib.error
 import urllib.request
 
+import core
+from speaker_mixin import SpeakerMixin
+
 DEFAULT_URL = "http://localhost:5000"
 
 
@@ -129,7 +132,7 @@ def raw_translate_batch(texts, base_url, src, dest, api_key=None, timeout=60):
     return result
 
 
-class LibreTranslator:
+class LibreTranslator(SpeakerMixin):
     """Тот же интерфейс, что у gtranslate.CachedTranslator и
     deepl_translate.DeepLTranslator (вызываемый объект + .stats +
     .stop() + .warm_batch()), чтобы программа могла использовать любой
@@ -167,18 +170,41 @@ class LibreTranslator:
         }
         self._stopped = False
         self._fatal_error = None
+        # Режим «Учитывать пол говорящего»: ключ «Имя: текст» уходит на сервер
+        # как есть (LibreTranslate локальный — лишние символы ничего не стоят),
+        # а имя потом срезается из перевода.
+        self._init_speakers()
 
     def stop(self):
         self._stopped = True
 
     def __call__(self, text):
-        if self._stopped or self._fatal_error:
-            return text
+        # Готовое из кэша отдаём и после остановки. Нет перевода — None (а не
+        # исходный текст/ключ «Имя: текст», см. комментарий в DeepLTranslator).
         if text in self.cache:
             self.stats["cache_hits"] += 1
             return self.cache[text]
+        if self._stopped or self._fatal_error:
+            return None
         self._translate_with_split([text])
-        return self.cache.get(text, text)
+        return self.cache.get(text)
+
+    @staticmethod
+    def _is_usable(source, translated):
+        """Годится ли перевод для кэша. Те же проверки, по которым
+        core.translate_quoted() потом всё равно отбросит перевод: если такой
+        результат записать в кэш, он будет «залипать» — каждый следующий запуск
+        брал бы из кэша тот же испорченный перевод и снова не мог бы его
+        использовать."""
+        if not translated or "\n" in translated or "\r" in translated:
+            return False
+        if not core.tokens_preserved(source, translated):
+            return False
+        if core.markers_collapsed(source, translated):
+            return False
+        if core.looks_truncated(source, translated):
+            return False
+        return True
 
     def warm_batch(self, texts):
         pending = [t for t in dict.fromkeys(texts) if t not in self.cache]
@@ -222,8 +248,21 @@ class LibreTranslator:
                 parts = raw_translate_batch(
                     batch, self.base_url, self.src, self.dest, self.api_key,
                 )
+                bad = 0
                 for src_text, translated in zip(batch, parts):
+                    speaker, text = self._split_key(src_text)
+                    if speaker:
+                        translated = self._strip_name(speaker, text, translated)
+                    if not self._is_usable(text, translated):
+                        bad += 1          # в кэш не кладём — переведётся заново
+                        continue
                     self.cache[src_text] = translated
+                if bad:
+                    self.log(
+                        tr("LibreTranslate вернул повреждённый перевод (теги/подстановки) "
+                        "у {0} из {1} строк — они не сохраняются в кэш и будут "
+                        "переведены заново при следующем запуске.").format(bad, len(batch))
+                    )
                 self.stats["requests"] += 1
                 if len(batch) > 1:
                     self.stats["batch_requests"] += 1

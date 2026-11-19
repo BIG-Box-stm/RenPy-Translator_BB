@@ -37,14 +37,30 @@ import argos_packages
 
 
 def libre_code(code):
-    """Код языка для LibreTranslate: китайский там "zh", а не "zh-CN"."""
+    """Код языка для LibreTranslate: китайский там "zh", а не "zh-CN";
+    португальский — "pb" (бразильский)."""
     code = (code or "").strip().lower()
-    return {"zh-cn": "zh"}.get(code, code)
+    # Португальский — бразильский (pb): у Argos есть прямые модели en->pb и pb->en.
+    return {"zh-cn": "zh", "pt": "pb"}.get(code, code)
+
+
+def libre_codes(src_code, dest_code):
+    """Коды языков LibreTranslate для ПАРЫ (src, dest). Как libre_code(), но
+    для пары «португальский ↔ испанский» берётся обычный код "pt": у Argos
+    есть прямые модели pt↔es (перевод без английского), а бразильский "pb"
+    с испанским напрямую не переводит."""
+    def norm(code):
+        code = (code or "").strip().lower()
+        return "zh" if code == "zh-cn" else code
+    s, d = norm(src_code), norm(dest_code)
+    if {s, d} == {"pt", "es"}:
+        return s, d
+    return libre_code(src_code), libre_code(dest_code)
 
 
 def languages_for_pair(src_code, dest_code):
     """Минимальный набор языков для --load-only под пару src -> dest."""
-    s, d = libre_code(src_code), libre_code(dest_code)
+    s, d = libre_codes(src_code, dest_code)
     result = [s]
     if argos_packages.has_direct(s, d):
         # Есть прямая модель (сейчас только pt <-> es) — английский не нужен.

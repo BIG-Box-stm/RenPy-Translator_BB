@@ -717,7 +717,7 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
     написано в файле, то и есть история разговора на этот момент.
 
     translate_line_fn(previous_source, previous_translation,
-    protected_current_source, rules_name) -> translated_text | None —
+    protected_current_source, rules_name, previous_name) -> translated_text | None —
     вызывается на каждую ЕЩЁ НЕ переведённую строку; previous_source/
     previous_translation — исходный (незащищённый) текст, пустые строки
     для old/new и для самой первой диалоговой строки файла.
@@ -735,6 +735,7 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
 
     previous_source = ""
     previous_translation = ""
+    previous_name = ""
 
     for entry in find_translatable(out):
         is_dialogue = entry['type'] == 'dialogue'
@@ -745,6 +746,7 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
             if is_dialogue:
                 previous_source = entry['orig_quoted'][1:-1]
                 previous_translation = entry['current_inner']
+                previous_name = rules_name or ""
             continue
 
         if not needs_translation(entry['orig_quoted']):
@@ -753,9 +755,10 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
 
         ctx_source = previous_source if is_dialogue else ""
         ctx_translation = previous_translation if is_dialogue else ""
+        ctx_name = previous_name if is_dialogue else ""
 
-        def _fn(protected_text, _s=ctx_source, _t=ctx_translation, _r=rules_name):
-            return translate_line_fn(_s, _t, protected_text, _r)
+        def _fn(protected_text, _s=ctx_source, _t=ctx_translation, _r=rules_name, _p=ctx_name):
+            return translate_line_fn(_s, _t, protected_text, _r, _p)
 
         translated = translate_quoted(entry['orig_quoted'], _fn)
 
@@ -771,6 +774,7 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
                 orig_inner = entry['orig_quoted'][1:-1]
                 previous_source = orig_inner
                 previous_translation = orig_inner
+                previous_name = rules_name or ""
             continue
 
         if entry['type'] == 'old_new':
@@ -785,6 +789,7 @@ def process_lines_contextual(lines, translate_line_fn, resolve_speaker_fn,
         if is_dialogue:
             previous_source = entry['orig_quoted'][1:-1]
             previous_translation = translated[1:-1]
+            previous_name = rules_name or ""
 
     return out
 

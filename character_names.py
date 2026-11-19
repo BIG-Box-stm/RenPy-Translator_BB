@@ -8,7 +8,7 @@
    внутреннего кода, который разработчик игры мог придумать как угодно
    (см. scan_character_names()/resolve_speaker_name()).
 
-2. Чек-боксом «Переводить имена» в GUI — имена персонажей (и, где
+2. Галочкой «Применить локализованные имена» в GUI — имена персонажей (и, где
    переопределён свой шрифт для имени, шрифт тоже) можно временно
    подменить в самих исходниках игры на переведённые и вернуть обратно
    в любой момент (см. update_character_names_file()/
@@ -20,6 +20,11 @@ Ren'Py обычно объявляет персонажей строкой ви�
 стандарта нет). Поэтому вместо того чтобы полагаться на конкретное имя
 файла, программа сканирует ВЕСЬ game/ (кроме game/tl — там уже переводы,
 не объявления).
+
+Что распознаётся: define/default/"$ x = ..." и простое присваивание в
+init python; Character, ADVCharacter, NVLCharacter; имя в виде "Имя",
+'Имя' и _("Имя") (с переводом через _()); вызов на нескольких строках и с
+комментарием после закрывающей скобки.
 
 Особые случаи при извлечении имени:
 - "Character(None)" — имени нет (рассказчик/системный голос) — такой
@@ -39,11 +44,129 @@ from i18n import tr
 import os
 import re
 
-_RE_CHARACTER_DEF = re.compile(
-    r'^[ \t]*(?:define|default)?[ \t]*(\w+)[ \t]*=[ \t]*Character[ \t]*\([ \t]*'
-    r'(?:(?P<q>["\'])(?P<name>(?:\\.|(?!(?P=q)).)*)(?P=q)|None\b)',
+# Начало определения персонажа. Сам вызов (до закрывающей скобки) разбирается
+# отдельно (_find_call_end): он может занимать несколько строк и иметь
+# комментарий после себя.
+_RE_CHARACTER_START = re.compile(
+    r'^[ \t]*(?:(?:define|default)[ \t]+(?:-?\d+[ \t]+)?|\$[ \t]*)?(?P<code>\w+)[ \t]*=[ \t]*'
+    r'(?:ADV|NVL)?Character[ \t]*\(',
     re.MULTILINE,
 )
+# Первый позиционный аргумент: "Имя", 'Имя' либо _("Имя").
+_RE_ARG_NAME = re.compile(
+    r'^\s*(?P<wrap>_\(\s*)?(?P<q>["\'])(?P<name>(?:\\.|(?!(?P=q)).)*)(?P=q)(?(wrap)\s*\)|)'
+)
+_RE_WHO_FONT = re.compile(r'\bwho_font\s*=\s*(?P<q>["\'])(?P<font>(?:\\.|(?!(?P=q)).)*)(?P=q)')
+
+
+def _skip_string(text, i):
+    """text[i] — открывающая кавычка строки. Возвращает индекс сразу после
+    закрывающей кавычки или None, если строка не закрыта."""
+    q = text[i]
+    n = len(text)
+    if text.startswith(q * 3, i):
+        j = i + 3
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text.startswith(q * 3, j):
+                return j + 3
+            j += 1
+        return None
+    j = i + 1
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == q:
+            return j + 1
+        if c == "\n":
+            return None
+        j += 1
+    return None
+
+
+def _find_call_end(text, open_idx):
+    """text[open_idx] == "(". Индекс парной ")" с учётом вложенных скобок,
+    строк и комментариев "#" — либо None, если вызов не закрыт."""
+    depth = 0
+    i = open_idx
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c in "\"'":
+            i = _skip_string(text, i)
+            if i is None:
+                return None
+            continue
+        if c == "#":
+            nl = text.find("\n", i)
+            if nl == -1:
+                return None
+            i = nl
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+            if depth < 0:
+                return None
+        i += 1
+    return None
+
+
+def _parse_character_defs(text):
+    """Все определения персонажей с ЗАДАННЫМ строкой именем в тексте файла.
+    Элемент: code, name (как в файле, внутри кавычек), quote (какими кавычками
+    записано имя), wrapped (имя обёрнуто в _()), name_span (начало, конец имени
+    в text), who_font (внутри кавычек или None), font_span, line (номер строки,
+    с 1). Character(None), имя не строкой (переменная, kind=...) и пустое имя
+    пропускаются."""
+    result = []
+    for m in _RE_CHARACTER_START.finditer(text):
+        open_idx = m.end() - 1
+        close_idx = _find_call_end(text, open_idx)
+        if close_idx is None:
+            continue
+        base = open_idx + 1
+        args = text[base:close_idx]
+        nm = _RE_ARG_NAME.match(args)
+        if not nm or not nm.group("name"):
+            continue
+        rest = args[nm.end():].lstrip()
+        if rest and rest[0] not in ",#":
+            continue                      # например "A" + "B" — не просто строка
+        fm = _RE_WHO_FONT.search(args, nm.end())
+        result.append({
+            "code": m.group("code"),
+            "name": nm.group("name"),
+            "quote": nm.group("q"),
+            "wrapped": bool(nm.group("wrap")),
+            "name_span": (base + nm.start("name"), base + nm.end("name")),
+            "who_font": fm.group("font") if fm else None,
+            "font_span": (base + fm.start("font"), base + fm.end("font")) if fm else None,
+            "line": text.count("\n", 0, m.start()) + 1,
+        })
+    return result
+
+
+def _plain_name(name):
+    """Имя как обычный текст: снимает экранирование кавычек (D\\'Arcy -> D'Arcy)."""
+    return re.sub(r'\\(["\'])', r'\1', name)
+
+
+def _convert_quote(inner, from_q, to_q):
+    """Переписывает содержимое строки, записанной кавычками from_q, под кавычки
+    to_q (экранирует/снимает экранирование кавычек)."""
+    if from_q == to_q:
+        return inner
+    plain = inner.replace("\\" + from_q, from_q)
+    return re.sub(r'(?<!\\)' + re.escape(to_q), lambda m: "\\" + to_q, plain)
+
 
 PLAYER_PLACEHOLDER = "Player"
 NARRATOR_PLACEHOLDER = "Narrator"
@@ -60,7 +183,8 @@ def _iter_source_rpy_files(game_dir):
 
 def scan_character_names(game_dir):
     """Сканирует все *.rpy в game_dir (кроме game/tl) на определения
-    персонажей вида 'define код = Character("Имя", ...)'. Возвращает
+    персонажей вида 'define код = Character("Имя", ...)' (в том числе
+    _("Имя"), NVLCharacter, вызов на нескольких строках). Возвращает
     dict {код: имя}. Первое найденное определение кода побеждает (если
     он почему-то объявлен в нескольких местах)."""
     result = {}
@@ -70,14 +194,11 @@ def scan_character_names(game_dir):
                 text = f.read()
         except Exception:
             continue
-        for m in _RE_CHARACTER_DEF.finditer(text):
-            code = m.group(1)
-            name = m.group("name")
-            if name is None:
-                continue  # Character(None) — сознательно без имени
+        for d in _parse_character_defs(text):
+            name = _plain_name(d["name"])
             if "[" in name:
                 name = PLAYER_PLACEHOLDER
-            result.setdefault(code, name)
+            result.setdefault(d["code"], name)
     return result
 
 
@@ -150,20 +271,6 @@ def migrate_legacy_names_file(lang_dir, log=None):
     )
     return True
 
-# В отличие от scan_character_names() (только код+имя), здесь нужен ещё
-# сам аргумент "who_font=..." целиком (если есть) — чтобы знать, какой
-# шрифт вернуть обратно при отключении галочки. Поэтому вместо поиска
-# только начала вызова разбираем весь список аргументов Character(...)
-# одной строкой (то же допущение, что и у _RE_CHARACTER_DEF: вызов
-# укладывается в одну строку — на практике так почти всегда и есть).
-_RE_CHARACTER_DEF_FULL = re.compile(
-    r'^[ \t]*(?:define|default)?[ \t]*(?P<code>\w+)[ \t]*=[ \t]*Character[ \t]*\('
-    r'(?P<args>.*)\)[ \t]*$',
-    re.MULTILINE,
-)
-_RE_ARG_NAME = re.compile(r'^\s*(?P<q>["\'])(?P<name>(?:\\.|(?!(?P=q)).)*)(?P=q)')
-_RE_WHO_FONT = re.compile(r'who_font\s*=\s*(?P<q>["\'])(?P<font>(?:\\.|(?!(?P=q)).)*)(?P=q)')
-
 # Заголовок одной записи в файле имён: "# путь/к/файлу.rpy:18  code=Hippo".
 # Номер строки — только подсказка для человека, при подмене программа
 # заново ищет определение персонажа по коду (см. _patch_character_line),
@@ -179,10 +286,11 @@ _RE_NAME_WHO_FONT_LINE = re.compile(r'^\s*who_font=(.+?)\s*$')
 
 def _scan_character_definitions(game_dir):
     """Как scan_character_names(), но для каждого персонажа возвращает
-    полную запись: код, оригинальное имя, свой шрифт имени (who_font,
-    если задан — иначе None), файл и номер строки. Пропускает
-    Character(None) и имена со вставкой переменной ("[...]") — там
-    нечего подставлять в игру вместо фиксированного текста."""
+    полную запись: код, оригинальное имя (в виде, пригодном для строки в двойных
+    кавычках), свой шрифт имени (who_font, если задан — иначе None), файл,
+    номер строки и признак wrapped (имя записано как _("...")). Пропускает
+    Character(None) и имена со вставкой переменной ("[...]") — там нечего
+    подставлять в игру вместо фиксированного текста."""
     result = []
     for path in _iter_source_rpy_files(game_dir):
         try:
@@ -191,22 +299,16 @@ def _scan_character_definitions(game_dir):
         except Exception:
             continue
         rel = os.path.relpath(path, game_dir).replace(os.sep, "/")
-        for m in _RE_CHARACTER_DEF_FULL.finditer(text):
-            args = m.group("args")
-            name_m = _RE_ARG_NAME.match(args.lstrip())
-            if not name_m:
-                continue  # Character(None) или без строки в начале — пропускаем
-            name = name_m.group("name")
-            if "[" in name:
+        for d in _parse_character_defs(text):
+            if "[" in d["name"]:
                 continue  # динамическое имя — фиксированного текста для подмены нет
-            font_m = _RE_WHO_FONT.search(args)
-            line_no = text.count("\n", 0, m.start()) + 1
             result.append({
-                "code": m.group("code"),
-                "name": name,
-                "who_font": font_m.group("font") if font_m else None,
+                "code": d["code"],
+                "name": _convert_quote(d["name"], d["quote"], '"'),
+                "who_font": d["who_font"],
                 "file": rel,
-                "line": line_no,
+                "line": d["line"],
+                "wrapped": d["wrapped"],
             })
     return result
 
@@ -223,7 +325,14 @@ def update_character_names_file(game_dir, names_path, log=None):
     known_codes = {e["code"] for e in existing}
 
     found = _scan_character_definitions(game_dir)
-    new_entries = [d for d in found if d["code"] not in known_codes]
+    # Один код — одна запись (первое определение, как и при подмене).
+    new_entries = []
+    seen = set(known_codes)
+    for d in found:
+        if d["code"] in seen:
+            continue
+        seen.add(d["code"])
+        new_entries.append(d)
     if not new_entries:
         log(tr("Новых персонажей не найдено — файл имён не изменился."))
         return 0
@@ -290,74 +399,58 @@ def parse_names_file(names_path):
 
 
 def _patch_character_line(path, code, new_name, new_who_font, log):
-    """Заново находит строку 'define код = Character(...)' по коду (не
-    по сохранённому номеру строки — файл мог измениться) и подменяет в
-    ней имя (первый строковый аргумент) и, если new_who_font не None,
-    значение who_font=. Возвращает True, если строка найдена и
-    изменена."""
+    """Заново находит определение персонажа по коду (не по сохранённому номеру
+    строки — файл мог измениться) и подменяет в нём имя (первый строковый
+    аргумент, в том числе внутри _("...")) и, если new_who_font не None,
+    значение who_font=. new_name — в виде строки в двойных кавычках (как в файле
+    имён). Вызов может занимать несколько строк. Возвращает True, если файл
+    действительно изменился."""
     try:
         with open(path, "r", encoding="utf-8", newline="") as f:
-            lines = f.readlines()
+            text = f.read()
     except Exception as e:
         log(tr("  ОШИБКА чтения {0}: {1}").format(path, e))
         return False
 
-    pattern = re.compile(
-        r'^([ \t]*(?:define|default)?[ \t]*' + re.escape(code) +
-        r'[ \t]*=[ \t]*Character[ \t]*\()(.*)(\)[ \t]*)$'
-    )
-    for i, raw in enumerate(lines):
-        stripped = raw.rstrip("\r\n")
-        eol = raw[len(stripped):]
-        m = pattern.match(stripped)
-        if not m:
-            continue
+    found = None
+    for d in _parse_character_defs(text):
+        if d["code"] == code:
+            found = d
+            break
+    if found is None:
+        log(tr("  {0}: определение персонажа {1!r} не найдено — пропускаю.").format(path, code))
+        return False
 
-        prefix, args, suffix = m.group(1), m.group(2), m.group(3)
-        name_m = _RE_ARG_NAME.match(args.lstrip())
-        if not name_m:
-            log(tr("  {0}: не удалось найти имя в определении {1!r} — пропускаю.").format(path, code))
-            return False
-        lead_ws = args[:len(args) - len(args.lstrip())]
-        quote = name_m.group("q")
-        escaped = new_name.replace("\\", "\\\\").replace(quote, "\\" + quote)
-        new_args = args[:len(lead_ws)] + quote + escaped + quote + args[len(lead_ws) + name_m.end():]
+    edits = [(found["name_span"][0], found["name_span"][1],
+              _convert_quote(new_name, '"', found["quote"]))]
+    if new_who_font is not None and found["font_span"]:
+        edits.append((found["font_span"][0], found["font_span"][1], new_who_font))
 
-        if new_who_font is not None:
-            font_m = _RE_WHO_FONT.search(new_args)
-            if font_m:
-                fq = font_m.group("q")
-                new_args = (
-                    new_args[:font_m.start("font")] + new_who_font
-                    + new_args[font_m.end("font"):]
-                )
+    new_text = text
+    for start, end, value in sorted(edits, reverse=True):
+        new_text = new_text[:start] + value + new_text[end:]
+    if new_text == text:
+        return False
 
-        lines[i] = prefix + new_args + suffix + eol
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(new_text)
+    except Exception as e:
+        log(tr("  ОШИБКА записи {0}: {1}").format(path, e))
+        return False
+    # Рядом с .rpy почти наверняка лежит скомпилированный .rpyc, оставшийся от
+    # предыдущего запуска игры (или сохранённый вместе с .rpy при раскомпиляции).
+    # Ren'Py обычно сам замечает, что .rpy новее, и перекомпилирует — но на
+    # некоторых системах/сборках этого не происходит надёжно, и тогда игра
+    # продолжает показывать СТАРЫЙ вариант строки. Удаляем устаревший .rpyc
+    # явно, чтобы Ren'Py гарантированно пересобрал его из свежего .rpy.
+    rpyc_path = path[:-4] + ".rpyc" if path.lower().endswith(".rpy") else None
+    if rpyc_path and os.path.isfile(rpyc_path):
         try:
-            with open(path, "w", encoding="utf-8", newline="") as f:
-                f.writelines(lines)
+            os.remove(rpyc_path)
         except Exception as e:
-            log(tr("  ОШИБКА записи {0}: {1}").format(path, e))
-            return False
-        # Рядом с .rpy почти наверняка лежит скомпилированный .rpyc,
-        # оставшийся от предыдущего запуска игры (или сохранённый вместе
-        # с .rpy при раскомпиляции). Ren'Py обычно сам замечает, что .rpy
-        # новее, и перекомпилирует — но на некоторых системах/сборках
-        # этого не происходит надёжно, и тогда игра продолжает
-        # показывать СТАРЫЙ (уже неактуальный) вариант строки, как будто
-        # наша правка не применилась. Удаляем устаревший .rpyc явно,
-        # чтобы Ren'Py гарантированно пересобрал его из свежего .rpy при
-        # следующем запуске.
-        rpyc_path = path[:-4] + ".rpyc" if path.lower().endswith(".rpy") else None
-        if rpyc_path and os.path.isfile(rpyc_path):
-            try:
-                os.remove(rpyc_path)
-            except Exception as e:
-                log(tr("  ОШИБКА удаления устаревшего {0}: {1}").format(rpyc_path, e))
-        return True
-
-    log(tr("  {0}: определение персонажа {1!r} не найдено — пропускаю.").format(path, code))
-    return False
+            log(tr("  ОШИБКА удаления устаревшего {0}: {1}").format(rpyc_path, e))
+    return True
 
 
 def apply_character_names(game_dir, entries, use_translated, light_font_rel=None, log=None):

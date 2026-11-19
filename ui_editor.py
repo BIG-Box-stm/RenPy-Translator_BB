@@ -30,11 +30,13 @@ Ctrl/Shift) и нажать «Перевод не требуется» (или �
 """
 
 from i18n import mark, tr
+import os
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import core
 import editor_store
+import prompts
 
 MAX_ROWS = 3000
 # Названия фильтров и «Все файлы» — ключи перевода; на экране они показываются
@@ -57,8 +59,14 @@ def _group(pairs):
 
 
 class EditorWindow(tk.Toplevel):
-    def __init__(self, master, lang_dir, lang_folder, log=None, dest_code=None):
+    def __init__(self, master, lang_dir, lang_folder, log=None, dest_code=None,
+                 export_dir=None, prompt_loader=None):
         super().__init__(master)
+        self.export_dir = export_dir or os.getcwd()
+        # prompt_loader() -> (текст выбранного в главном окне промпта | None, код языка
+        # оригинала, код языка перевода) — для файла экспорта.
+        self.prompt_loader = prompt_loader
+        self.import_notes = {}     # (rel, key) -> причина, по которой строка осталась после импорта
         self.title(tr("Редактор переводов"))
         self.geometry("1300x650")
         self.lang_dir = lang_dir
@@ -96,6 +104,7 @@ class EditorWindow(tk.Toplevel):
             v.trace_add("write", lambda *a: self.refresh())
         ttk.Button(top, text=tr("Применить"), command=self.apply).pack(side="right")
         ttk.Button(top, text=tr("Обновить список"), command=self.reload).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text=tr("Экспорт/импорт строк"), command=self.export_import).pack(side="right", padx=(0, 8))
 
         bar2 = ttk.Frame(self)
         bar2.pack(fill="x", padx=8, pady=(0, 2))
@@ -225,13 +234,19 @@ class EditorWindow(tk.Toplevel):
         self.tree.yview_moveto(pos)
 
     def values_of(self, row):
+        k = _kof(row)
+        if k in self.edits and k in self.import_notes:
+            note = tr("Импорт: {0}").format(self.import_notes[k])
+        elif k in self.edits or k in self.skips or k in self.confirms:
+            note = ""
+        else:
+            note = row["note"]
         return (
             editor_store.display_path(self.lang_folder, row["rel"]),
             row["who"],
             row["orig"],
             self.shown_translation(row),
-            "" if (_kof(row) in self.edits or _kof(row) in self.skips
-                   or _kof(row) in self.confirms) else row["note"],
+            note,
         )
 
     def tags_of(self, row):
@@ -384,6 +399,125 @@ class EditorWindow(tk.Toplevel):
             text += tr("   Изменено, но не применено: {0}").format(self.pending_count())
         self.info.configure(text=text)
 
+    # ---- экспорт / импорт строк -------------------------------------------
+    def export_import(self):
+        choice = self._ask_export_import()
+        if choice == "export":
+            self.do_export()
+        elif choice == "import":
+            self.do_import()
+
+    def _ask_export_import(self):
+        result = {"v": None}
+        dlg = tk.Toplevel(self)
+        dlg.title(tr("Экспорт/импорт строк"))
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        ttk.Label(
+            dlg, justify="left", wraplength=480,
+            text=tr("Экспорт сохраняет в .txt оригиналы строк из групп «Подозрительные» и «Не "
+                    "переведённые» (с промптом из главного окна) — файл можно загрузить в "
+                    "нейросеть (ChatGPT, Gemini и т.п.). Импорт загружает обратно переведённый "
+                    "файл: строки, прошедшие проверки, записываются в игру и пропадают из "
+                    "списка, остальные остаются в редакторе."),
+        ).pack(padx=16, pady=(14, 10), anchor="w")
+
+        def pick(v):
+            result["v"] = v
+            dlg.destroy()
+
+        ttk.Button(dlg, text=tr("Экспортировать строки в .txt"), command=lambda: pick("export")).pack(
+            fill="x", padx=16, pady=3)
+        ttk.Button(dlg, text=tr("Импортировать переведённый .txt"), command=lambda: pick("import")).pack(
+            fill="x", padx=16, pady=3)
+        ttk.Button(dlg, text=tr("Отмена"), command=dlg.destroy).pack(fill="x", padx=16, pady=(8, 14))
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        dlg.update_idletasks()
+        dlg.grab_set()
+        self.wait_window(dlg)
+        return result["v"]
+
+    def do_export(self):
+        entries = editor_store.export_entries(self.rows)
+        if not entries:
+            messagebox.showinfo(
+                tr("Экспорт/импорт строк"),
+                tr("Нечего экспортировать: в группах «Подозрительные» и «Не переведённые» нет строк."))
+            return
+        prompt_text, src_code, dest_code = (None, None, self.dest_code)
+        if self.prompt_loader:
+            try:
+                prompt_text, src_code, dest_code = self.prompt_loader()
+            except Exception as e:
+                self.log(tr("Не удалось получить промпт для экспорта: {0}").format(e))
+        text = editor_store.build_export_text(
+            entries, prompt_text,
+            prompts.language_name(src_code) if src_code else None,
+            prompts.language_name(dest_code) if dest_code else None)
+        path = editor_store.export_file_path(self.export_dir, self.lang_dir)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception as e:
+            messagebox.showerror(tr("Экспорт/импорт строк"), tr("Не удалось сохранить файл: {0}").format(e))
+            return
+        self.log(tr("Экспорт строк: {0} записей -> {1}").format(len(entries), path))
+        note = "" if prompt_text else "\n\n" + tr(
+            "Внимание: выбранный в главном окне промпт не найден — в файле только пояснение формата.")
+        messagebox.showinfo(
+            tr("Экспорт/импорт строк"),
+            tr("Экспортировано записей: {0} (одинаковые оригиналы одного говорящего — один раз).\n"
+               "Файл: {1}\n\nЗагрузите файл в нейросеть целиком, ответ сохраните в .txt и "
+               "импортируйте его обратно этой же кнопкой.").format(len(entries), path) + note)
+
+    def do_import(self):
+        path = filedialog.askopenfilename(
+            parent=self, title=tr("Выберите переведённый .txt"), initialdir=self.export_dir,
+            filetypes=[(tr("Текстовые файлы"), "*.txt"), (tr("Все файлы"), "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                text = f.read()
+        except Exception as e:
+            messagebox.showerror(tr("Экспорт/импорт строк"), tr("Не удалось прочитать файл: {0}").format(e))
+            return
+        entries = editor_store.parse_import_text(text)
+        if not entries:
+            messagebox.showerror(
+                tr("Экспорт/импорт строк"),
+                tr("В файле не найдено ни одной записи вида [0001]. Проверьте, что нейросеть "
+                   "вернула файл в том же формате."))
+            return
+        res = editor_store.evaluate_import(self.rows, entries, self.dest_code)
+        applied = 0
+        if res["edits"]:
+            try:
+                applied = editor_store.write_translations(self.lang_dir, res["edits"], log=self.log)
+            except Exception as e:
+                messagebox.showerror(tr("Экспорт/импорт строк"), tr("Не удалось записать переводы: {0}").format(e))
+                return
+        kept = 0
+        if res["kept"]:
+            self.push_history()
+            for k, (inner, reason) in res["kept"].items():
+                if inner is not None:
+                    self.edits[k] = inner
+                    self.import_notes[k] = reason
+                    self.skips.discard(k)
+                    self.confirms.discard(k)
+                    kept += 1
+        self.log(tr("Импорт строк: записано в игру — {0}, оставлено в редакторе — {1}, не найдено — {2}, "
+                    "пустых — {3}.").format(applied, kept, res["not_found"], res["empty"]))
+        self.reload()
+        messagebox.showinfo(
+            tr("Экспорт/импорт строк"),
+            tr("Импорт завершён.\n\nПрошли проверки и записаны в файлы игры: {0}.\nНе прошли проверки — "
+               "остались в редакторе с переводом из файла (проверьте, исправьте и нажмите «Применить»; причина "
+               "в столбце «Замечание»): {1}.\nНе найдены в редакторе (оригинал в файле изменён или строка "
+               "уже переведена): {2}.\nС пустым переводом: {3}.").format(
+                   applied, kept, res["not_found"], res["empty"]))
+
     # ---- применение -------------------------------------------------------
     def apply(self):
         if not self.pending_count():
@@ -412,6 +546,7 @@ class EditorWindow(tk.Toplevel):
         self.unskips = set()
         self.confirms = set()
         self.unconfirms = set()
+        self.import_notes = {}
         self.history = []     # применённое откатить кнопкой нельзя
         self.reload()
         parts = []

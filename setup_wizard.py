@@ -26,6 +26,7 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import renpy_sdk
 import setup_core as sc
 
 # Описания переводчиков: (ключ, название, требование к видеопамяти, время на
@@ -55,12 +56,18 @@ OPTIONS = [
           "лучше строит предложения, кальки практически отсутствуют.")),
 ]
 
+SDK_NOTE = mark(
+    "Ren'Py SDK — официальный набор инструментов Ren'Py. Он нужен программе, чтобы создать папку "
+    "перевода game/tl/<код>: SDK разбирает сценарий игры так же, как сам движок, поэтому "
+    "идентификаторы строк получаются правильными. Нужную версию SDK программа подбирает по версии "
+    "игры, поэтому ставьте SDK для тех версий Ren'Py, на которых сделаны ваши игры.")
+
+GOOGLE_TITLE = mark("Google Translate (онлайн, устанавливать не нужно)")
 GOOGLE_NOTE = mark(
-    "Онлайн-вариант, устанавливать не нужно — Google Translate (12 секунд на 120 тестовых строк). "
-    "Качество между LibreTranslate и TranslateGemma: встречаются кальки, но перевод ближе к "
-    "естественному, чем к «грубой машине»; пытается использовать словосочетания и речевые "
-    "обороты, хотя часто неудачно. Главная проблема — это бесплатный неофициальный сервис: через "
-    "15–30 минут работы Google блокирует соединение на 12–24 часа.")
+    "12 секунд на 120 тестовых строк. Качество между LibreTranslate и TranslateGemma: встречаются "
+    "кальки, но перевод ближе к естественному, чем к «грубой машине»; пытается использовать "
+    "словосочетания и речевые обороты, хотя часто неудачно. Главная проблема — это бесплатный "
+    "неофициальный сервис: через 15–30 минут работы Google блокирует соединение на 12–24 часа.")
 
 SPEED_NOTE = mark(
     "Важно: модели очень зависят от видеопамяти. Резкий скачок времени между Gemma 4 Q4 и Q6 — не "
@@ -87,6 +94,7 @@ class SetupWizard(tk.Toplevel):
         self.cancel = threading.Event()
         self.q = queue.Queue()
         self.releases = None
+        self.sdk_data = None
         self.plan = None
         self._checked_once = False
         self._last_progress_label = ""
@@ -97,20 +105,32 @@ class SetupWizard(tk.Toplevel):
         self.opt_status = {}
         default_folder = settings.get("gemma_llama_folder") or os.path.join(script_dir, "llama")
         self.folder_var = tk.StringVar(value=default_folder)
-        self.reinstall_var = tk.BooleanVar(value=False)
         self.pick_version_var = tk.BooleanVar(value=False)
         self.version_var = tk.StringVar()
         self.variant_var = tk.StringVar(value=tr(VARIANTS[0][1]))
         self.installed_var = tk.StringVar()
+        # Ren'Py SDK: галочка и версия для каждой мажорной версии.
+        self.sdk_base = renpy_sdk.sdk_base_dir(script_dir)
+        self.sdk_checks = {m: tk.BooleanVar(value=(m != 6)) for m in sc.SDK_MAJORS}
+        self.sdk_versions = {m: tk.StringVar() for m in sc.SDK_MAJORS}
+        self.sdk_combos = {}
+        self.sdk_frames = {}
+        self.sdk_installed = set()
+        self._inst_seq = 0
+        self._inst_job = None
         self.status_var = tk.StringVar(value="")
 
         self._build()
         self.vram_var.trace_add("write", lambda *a: self._update_statuses())
-        self.folder_var.trace_add("write", lambda *a: self._update_installed())
+        self.folder_var.trace_add("write", lambda *a: self._schedule_installed())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll)
         self._update_installed()
         self._refresh_info()
+        # Списки версий (llama.cpp на GitHub и Ren'Py SDK на renpy.org) читаются
+        # сразу при открытии мастера, а не по галочке.
+        threading.Thread(target=self._releases_worker, daemon=True).start()
+        threading.Thread(target=self._sdk_worker, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Построение окна (прокручиваемая область + нижняя панель с журналом)
@@ -169,13 +189,41 @@ class SetupWizard(tk.Toplevel):
         self.sys_warn = ttk.Label(g_sys, text="", foreground="#b00020", justify="left", wraplength=self.wrap)
         self.sys_warn.pack(fill="x", padx=8, pady=(0, 6))
 
-        # --- Что установить ---------------------------------------------
-        g_opt = ttk.LabelFrame(body, text=tr("Что установить"))
+        # --- Ren'Py SDK ---------------------------------------------------
+        g_sdk = ttk.LabelFrame(body, text=tr("Что установить: Ren'Py SDK"))
+        g_sdk.pack(fill="x", **pad)
+        ttk.Label(g_sdk, text=tr(SDK_NOTE), justify="left", wraplength=self.wrap,
+                  foreground="#444444").pack(fill="x", padx=8, pady=(6, 4))
+        row = ttk.Frame(g_sdk)
+        row.pack(fill="x", padx=8, pady=(2, 8))
+        for major in sc.SDK_MAJORS:
+            frame = ttk.Frame(row)
+            self.sdk_frames[major] = frame
+            ttk.Checkbutton(frame, text=tr("Ren'Py {0}").format(major),
+                            variable=self.sdk_checks[major]).pack(side="left")
+            combo = ttk.Combobox(frame, textvariable=self.sdk_versions[major], width=16, state="readonly")
+            combo.pack(side="left", padx=(6, 18))
+            self.sdk_combos[major] = combo
+            if major != 9:     # версия 9 скрыта, пока её нет на сайте renpy.org
+                frame.pack(side="left")
+
+        # --- Переводчики --------------------------------------------------
+        g_opt = ttk.LabelFrame(body, text=tr("Что установить: Переводчик"))
         g_opt.pack(fill="x", **pad)
         ttk.Label(g_opt, textvariable=self.rec_var, font=("TkDefaultFont", 10, "bold"),
-                  justify="left", wraplength=self.wrap).pack(fill="x", padx=8, pady=(6, 2))
-        ttk.Label(g_opt, text=tr(SPEED_NOTE), justify="left", wraplength=self.wrap,
-                  foreground="#555555").pack(fill="x", padx=8, pady=(0, 6))
+                  justify="left", wraplength=self.wrap).pack(fill="x", padx=8, pady=(6, 4))
+        # Предупреждение про видеопамять — в мягкой янтарной рамке, чтобы заметно, но не резало глаз.
+        accent = tk.Frame(g_opt, background="#E3B341")
+        accent.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Label(accent, text=tr(SPEED_NOTE), justify="left", anchor="w", wraplength=self.wrap - 24,
+                 background="#FFF7E0", foreground="#5C4500", padx=10, pady=6).pack(
+                     fill="x", padx=(4, 0))
+        # Онлайн-вариант (устанавливать не нужно) — первым пунктом, сразу под «Важно».
+        gframe = ttk.Frame(g_opt)
+        gframe.pack(fill="x", padx=8, pady=(2, 6))
+        ttk.Label(gframe, text=tr(GOOGLE_TITLE), font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        ttk.Label(gframe, text=tr(GOOGLE_NOTE), justify="left", wraplength=self.wrap,
+                  foreground="#444444").pack(fill="x", padx=(24, 0))
         for key, title, need, seconds, desc in OPTIONS:
             frame = ttk.Frame(g_opt)
             frame.pack(fill="x", padx=8, pady=(2, 4))
@@ -189,9 +237,7 @@ class SetupWizard(tk.Toplevel):
                       justify="left", wraplength=self.wrap).pack(fill="x", padx=(24, 0))
             ttk.Label(frame, text=tr(desc), justify="left", wraplength=self.wrap,
                       foreground="#444444").pack(fill="x", padx=(24, 0))
-        ttk.Separator(g_opt).pack(fill="x", padx=8, pady=4)
-        ttk.Label(g_opt, text=tr(GOOGLE_NOTE), justify="left", wraplength=self.wrap,
-                  foreground="#444444").pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(g_opt, text="").pack(pady=(0, 2))
 
         # --- llama.cpp ----------------------------------------------------
         g_llama = ttk.LabelFrame(body, text=tr("llama.cpp (нужна для моделей Gemma)"))
@@ -203,17 +249,16 @@ class SetupWizard(tk.Toplevel):
         ttk.Button(row, text=tr("Обзор..."), command=self._choose_folder).pack(side="left", padx=(6, 0))
         ttk.Label(g_llama, textvariable=self.installed_var, justify="left", wraplength=self.wrap).pack(
             anchor="w", padx=8, pady=(0, 2))
-        ttk.Checkbutton(
-            g_llama, text=tr("Переустановить llama.cpp (модели и CUDA-библиотеки той же версии сохраняются)"),
-            variable=self.reinstall_var).pack(anchor="w", padx=8)
         row = ttk.Frame(g_llama)
         row.pack(fill="x", padx=8, pady=(2, 2))
-        ttk.Checkbutton(row, text=tr("Выбрать версию"), variable=self.pick_version_var,
+        ttk.Checkbutton(row, text=tr("Установить версию llama.cpp"), variable=self.pick_version_var,
                         command=self._on_pick_version).pack(side="left")
         self.version_combo = ttk.Combobox(row, textvariable=self.version_var, width=30, state="disabled")
         self.version_combo.pack(side="left", padx=(8, 0))
         ttk.Label(row, text=tr("(список с GitHub или впишите номер сборки, например b11723)")).pack(
             side="left", padx=(8, 0))
+        ttk.Label(g_llama, text=tr("Модели и CUDA-библиотеки сохраняются (CUDA заменяется только при смене её версии)."),
+                  justify="left", wraplength=self.wrap, foreground="#555555").pack(anchor="w", padx=8)
         row = ttk.Frame(g_llama)
         row.pack(fill="x", padx=8, pady=(2, 8))
         ttk.Label(row, text=tr("Тип сборки:")).pack(side="left")
@@ -253,8 +298,11 @@ class SetupWizard(tk.Toplevel):
                     _k, done, total, phase, label = item
                     if total:
                         self.progress.configure(mode="determinate", value=100.0 * done / total)
-                    text = (tr("Проверка файла") if phase == "verify" else tr("Скачивание")) + ": "
-                    text += "{0} / {1}".format(sc.format_size(done), sc.format_size(total))
+                    if phase == "extract":
+                        text = tr("Распаковка") + ": {0} / {1}".format(done, total)
+                    else:
+                        text = (tr("Проверка файла") if phase == "verify" else tr("Скачивание")) + ": "
+                        text += "{0} / {1}".format(sc.format_size(done), sc.format_size(total))
                     self.status_var.set((self._last_progress_label + " — " if self._last_progress_label else "") + text)
                 elif kind == "label":
                     self._last_progress_label = item[1]
@@ -262,6 +310,11 @@ class SetupWizard(tk.Toplevel):
                     self._apply_info(item[1])
                 elif kind == "releases":
                     self._apply_releases(item[1], item[2])
+                elif kind == "sdk":
+                    self._apply_sdk(item[1], item[2])
+                elif kind == "installed":
+                    if item[1] == self._inst_seq:
+                        self.installed_var.set(item[2])
                 elif kind == "plan":
                     self._confirm_plan(item[1], item[2])
                 elif kind == "done":
@@ -386,12 +439,31 @@ class SetupWizard(tk.Toplevel):
             else:
                 label.configure(text=tr("— может не хватить видеопамяти"), foreground="#b00020")
 
+    def _schedule_installed(self):
+        """Пока пользователь печатает путь, версию llama.cpp не спрашиваем на
+        каждый символ — запуск llama-server --version занимает время."""
+        try:
+            if self._inst_job is not None:
+                self.after_cancel(self._inst_job)
+            self._inst_job = self.after(600, self._update_installed)
+        except Exception:
+            self._update_installed()
+
     def _update_installed(self):
-        summary = sc.installed_summary(self.folder_var.get().strip())
-        if summary:
-            self.installed_var.set(tr("Установлено сейчас: llama.cpp {0}").format(summary))
-        else:
+        self._inst_seq += 1
+        seq = self._inst_seq
+        folder = self.folder_var.get().strip()
+        if not folder or not os.path.isfile(os.path.join(folder, sc.SERVER_EXE)):
             self.installed_var.set(tr("llama.cpp в этой папке ещё не установлена."))
+            return
+        self.installed_var.set(tr("Определяю версию llama.cpp..."))
+        threading.Thread(target=self._installed_worker, args=(folder, seq), daemon=True).start()
+
+    def _installed_worker(self, folder, seq):
+        summary = sc.installed_summary(folder)
+        text = tr("Установлено сейчас: llama.cpp {0}").format(summary) if summary \
+            else tr("llama.cpp в этой папке ещё не установлена.")
+        self.q.put(("installed", seq, text))
 
     def _choose_folder(self):
         path = filedialog.askdirectory(title=tr("Выберите папку для llama.cpp"), parent=self)
@@ -402,13 +474,7 @@ class SetupWizard(tk.Toplevel):
     # Выбор версии llama.cpp
     # ------------------------------------------------------------------
     def _on_pick_version(self):
-        if not self.pick_version_var.get():
-            self.version_combo.configure(state="disabled")
-            return
-        self.version_combo.configure(state="normal")
-        if self.releases is None:
-            self.version_combo.set(tr("Загружаю список версий..."))
-            threading.Thread(target=self._releases_worker, daemon=True).start()
+        self.version_combo.configure(state="normal" if self.pick_version_var.get() else "disabled")
 
     def _releases_worker(self):
         try:
@@ -419,14 +485,48 @@ class SetupWizard(tk.Toplevel):
 
     def _apply_releases(self, rels, error):
         if rels is None:
-            self.version_combo.set("")
             self._log(tr("Не удалось получить список версий: {0}").format(error))
             self._log(tr("Впишите номер сборки вручную (например b11723)."))
             return
         self.releases = rels
         values = ["{0} ({1})".format(r["tag"], r["date"]) if r["date"] else r["tag"] for r in rels]
         self.version_combo.configure(values=values)
-        self.version_combo.set(values[0] if values else "")
+        if values and not self.version_var.get():
+            self.version_var.set(values[0])
+
+    # ------------------------------------------------------------------
+    # Ren'Py SDK: список версий с renpy.org
+    # ------------------------------------------------------------------
+    def _sdk_worker(self):
+        try:
+            self.q.put(("sdk", sc.list_renpy_sdk_versions(os.path.join(self.script_dir, "logs")), None))
+        except Exception as e:
+            self.q.put(("sdk", None, str(e)))
+
+    def _sdk_label(self, version):
+        return version + (" " + tr("(установлена)") if version in self.sdk_installed else "")
+
+    def _apply_sdk(self, data, error):
+        if data is None:
+            self._log(tr("Не удалось получить список версий Ren'Py SDK: {0}").format(error))
+            self._log(tr("Использую встроенный список версий Ren'Py SDK."))
+            data = sc.FALLBACK_SDK
+        self.sdk_data = data
+        try:
+            self.sdk_installed = sc.installed_sdk_versions(self.sdk_base)
+        except Exception:
+            self.sdk_installed = set()
+        for major in sc.SDK_MAJORS:
+            versions = data.get(major, [])
+            combo = self.sdk_combos[major]
+            combo.configure(values=[self._sdk_label(v) for v in versions])
+            self.sdk_versions[major].set(self._sdk_label(versions[0]) if versions else "")
+            if major == 9:
+                # SDK 9 показывается, только если такая версия появилась на сайте.
+                if versions:
+                    self.sdk_frames[major].pack(side="left")
+                else:
+                    self.sdk_frames[major].pack_forget()
 
     def _chosen_tag(self):
         if not self.pick_version_var.get():
@@ -444,17 +544,39 @@ class SetupWizard(tk.Toplevel):
     # ------------------------------------------------------------------
     # Установка: 1) план  2) подтверждение  3) выполнение
     # ------------------------------------------------------------------
+    def _sdk_selection(self):
+        """[(мажорная версия, версия SDK)] для отмеченных строк, у которых
+        версия ещё не установлена."""
+        try:
+            installed = sc.installed_sdk_versions(self.sdk_base)
+        except Exception:
+            installed = set()
+        result = []
+        for major in sc.SDK_MAJORS:
+            if not self.sdk_checks[major].get():
+                continue
+            if major == 9 and not (self.sdk_data or {}).get(9):
+                continue      # строка скрыта
+            version = self.sdk_versions[major].get().strip().split(" ")[0]
+            if not version or version in installed:
+                continue
+            result.append((major, version))
+        return result
+
     def _start_install(self):
         if self.busy:
             return
         keys = [k for k, v in self.opt_vars.items() if v.get()]
         need_llama = any(sc.MODELS.get(k) for k in keys)
-        want_reinstall = self.reinstall_var.get()
+        want_version = self.pick_version_var.get()
         folder = self.folder_var.get().strip()
-        if not keys and not want_reinstall:
-            messagebox.showinfo(tr("Мастер установки"), tr("Ничего не выбрано."), parent=self)
+        sdks = self._sdk_selection()
+        if not keys and not want_version and not sdks:
+            messagebox.showinfo(tr("Мастер установки"),
+                                tr("Нечего устанавливать: ничего не выбрано или выбранное уже установлено."),
+                                parent=self)
             return
-        if (need_llama or want_reinstall) and not folder:
+        if (need_llama or want_version) and not folder:
             messagebox.showerror(tr("Мастер установки"), tr("Укажите папку для llama.cpp."), parent=self)
             return
         vram = self._vram_value()
@@ -465,10 +587,13 @@ class SetupWizard(tk.Toplevel):
                    "очень медленно или не запустится. Продолжить всё равно?").format(vram), parent=self):
             return
         exe_exists = os.path.isfile(os.path.join(folder, sc.SERVER_EXE)) if folder else False
-        install_llama = (need_llama and not exe_exists) or want_reinstall
+        # llama.cpp ставится, если её ещё нет (и выбрана модель Gemma) либо если явно
+        # отмечено «Установить версию llama.cpp» (в том числе та же версия — это переустановка).
+        install_llama = (need_llama and not exe_exists) or want_version
         sel = {
             "keys": keys, "folder": folder, "install_llama": install_llama,
             "tag": self._chosen_tag(), "variant": self._chosen_variant(),
+            "sdks": [v for _m, v in sdks],
         }
         self.cancel.clear()
         self._set_busy(True)
@@ -479,7 +604,12 @@ class SetupWizard(tk.Toplevel):
     def _plan_worker(self, sel):
         try:
             info = self.info or {"arch": sc.detect_arch(), "gpu": None}
-            plan = {"sel": sel, "models": [], "llama": None, "libre": "libretranslate" in sel["keys"]}
+            plan = {"sel": sel, "models": [], "llama": None, "sdk": [],
+                    "libre": "libretranslate" in sel["keys"]}
+            for v in sel.get("sdks", []):
+                size = sc._content_length(sc.RENPY_SDK_ZIP.format(v=v)) \
+                    or sc._content_length(sc.RENPY_SDK_SFX.format(v=v))
+                plan["sdk"].append({"version": v, "size": size})
             if sel["install_llama"]:
                 tag = sel["tag"]
                 if tag:
@@ -500,7 +630,7 @@ class SetupWizard(tk.Toplevel):
                 if key in sc.MODELS:
                     self._log(tr("Узнаю размер и контрольную сумму файлов модели {0}...").format(key))
                     plan["models"].extend(sc.plan_model_files(key, models_dir))
-            total = sum(m["size"] or 0 for m in plan["models"])
+            total = sum(m["size"] or 0 for m in plan["models"]) + sum(i["size"] or 0 for i in plan["sdk"])
             zip_total = 0
             if plan["llama"]:
                 bp = plan["llama"]["build"]
@@ -509,7 +639,8 @@ class SetupWizard(tk.Toplevel):
                         zip_total += part["size"] or 0
             plan["download_bytes"] = total + zip_total
             plan["need_bytes"] = total + 3 * zip_total + 300 * 1024 * 1024
-            plan["free_bytes"] = sc.free_space_bytes(sel["folder"]) if sel["folder"] else None
+            check_path = sel["folder"] if (sel["folder"] and (plan["llama"] or plan["models"])) else self.sdk_base
+            plan["free_bytes"] = sc.free_space_bytes(check_path)
             self.q.put(("plan", plan, None))
         except sc.Cancelled:
             self.q.put(("done", "cancelled", None))
@@ -518,6 +649,8 @@ class SetupWizard(tk.Toplevel):
 
     def _confirm_plan(self, plan, _unused):
         lines = []
+        for item in plan.get("sdk", []):
+            lines.append(tr("• Ren'Py SDK {0}").format(item["version"]))
         if plan["libre"]:
             lines.append(tr("• LibreTranslate (pip install)"))
         if plan["llama"]:
@@ -550,6 +683,13 @@ class SetupWizard(tk.Toplevel):
         sel = plan["sel"]
         updates = {"mtp_choices": {}, "defaults": {}}
         try:
+            for item in plan.get("sdk", []):
+                self.q.put(("label", "Ren'Py SDK " + item["version"]))
+                self._set_status(tr("Устанавливаю Ren'Py SDK {0}...").format(item["version"]))
+                sc.install_renpy_sdk(item["version"], self.sdk_base, log=self._log,
+                                     progress=self._progress, cancel=self.cancel)
+                self._log(tr("Ren'Py SDK {0} установлен в {1}.").format(item["version"], self.sdk_base))
+                updates["sdk_installed"] = True
             if plan["libre"]:
                 self.q.put(("label", tr("LibreTranslate")))
                 self._set_status(tr("Устанавливаю LibreTranslate (pip)..."))
@@ -601,6 +741,16 @@ class SetupWizard(tk.Toplevel):
         self.progress.configure(value=0)
         self._last_progress_label = ""
         self._update_installed()
+        try:
+            self.sdk_installed = sc.installed_sdk_versions(self.sdk_base)
+            for major in sc.SDK_MAJORS:
+                versions = (self.sdk_data or {}).get(major, [])
+                cur = self.sdk_versions[major].get().strip().split(" ")[0]
+                self.sdk_combos[major].configure(values=[self._sdk_label(v) for v in versions])
+                if cur:
+                    self.sdk_versions[major].set(self._sdk_label(cur))
+        except Exception:
+            pass
         if status == "ok":
             self.status_var.set(tr("Установка завершена."))
             try:

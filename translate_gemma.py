@@ -43,6 +43,10 @@ class GemmaError(Exception):
     """Сетевая или протокольная ошибка при обращении к серверу."""
 
 
+class GemmaConnectionError(GemmaError):
+    """Сервер недоступен вообще — повторять остальные строки бессмысленно."""
+
+
 # Иногда (небольшая локальная модель, не идеальная) Translate Gemma вместо
 # чистого перевода повторяет кусок собственного промпта — например,
 # буквально вставляет "[CURRENT_SOURCE]" в ответ вместо того, чтобы
@@ -65,17 +69,31 @@ def _looks_like_prompt_leak(text):
 _looks_truncated = core.looks_truncated
 
 
+def _label(tag, name):
+    """«[CURRENT_SOURCE] (speaker: Имя)» — имя говорящего в заголовке блока."""
+    return "{0} (speaker: {1})".format(tag, name) if name else tag
+
+
 def build_messages(previous_source, previous_translation, current_source, rules_name=None,
-                    system_prompt=None):
+                    system_prompt=None, previous_name=None, speaker_format="label"):
+    """speaker_format="label" (по умолчанию): имя говорящего стоит в заголовках
+    блоков — «[PREVIOUS_SOURCE] (speaker: Bob)» и «[CURRENT_SOURCE] (speaker:
+    Aelira)»; "rules" — прежний вариант: строка «RULES: Speakers name: ...»
+    в конце системного сообщения."""
     system = system_prompt or ""
+    cur_name = None
+    prev_name = None
     if rules_name:
-        system += "\n\nRULES: Speakers name: {0}".format(rules_name)
+        if speaker_format == "rules":
+            system += "\n\nRULES: Speakers name: {0}".format(rules_name)
+        else:
+            cur_name, prev_name = rules_name, previous_name
 
     parts = []
     if previous_source and previous_translation:
-        parts.append("[PREVIOUS_SOURCE]\n{0}".format(previous_source))
+        parts.append("{0}\n{1}".format(_label("[PREVIOUS_SOURCE]", prev_name), previous_source))
         parts.append("[PREVIOUS_TRANSLATION]\n{0}".format(previous_translation))
-    parts.append("[CURRENT_SOURCE]\n{0}".format(current_source))
+    parts.append("{0}\n{1}".format(_label("[CURRENT_SOURCE]", cur_name), current_source))
     user = "\n\n".join(parts)
 
     return [
@@ -86,7 +104,7 @@ def build_messages(previous_source, previous_translation, current_source, rules_
 
 def raw_translate(base_url, previous_source, previous_translation, current_source,
                    rules_name=None, system_prompt=None, max_tokens=DEFAULT_N_PREDICT, timeout=60,
-                   return_info=False):
+                   return_info=False, previous_name=None, speaker_format="label"):
     """Один запрос к /v1/chat/completions. Возвращает переведённый текст
     (обрезанный по краям пробелов). Бросает GemmaError при сетевой или
     протокольной ошибке. С return_info=True возвращает пару (текст, info),
@@ -97,6 +115,7 @@ def raw_translate(base_url, previous_source, previous_translation, current_sourc
     payload = {
         "messages": build_messages(
             previous_source, previous_translation, current_source, rules_name, system_prompt,
+            previous_name, speaker_format,
         ),
         "temperature": 0,
         "max_tokens": max_tokens,
@@ -116,7 +135,7 @@ def raw_translate(base_url, previous_source, previous_translation, current_sourc
             pass
         raise GemmaError("HTTP {0}: {1}".format(e.code, body_text[:300]))
     except urllib.error.URLError as e:
-        raise GemmaError(
+        raise GemmaConnectionError(
             tr("Не удалось подключиться к Translate Gemma по адресу {0} ({1}). "
             "Убедитесь, что сервер запущен (кнопка «Запустить Translate "
             "Gemma») и адрес указан верно.").format(url, e.reason)
@@ -146,7 +165,8 @@ class GemmaTranslator:
 
     def __init__(self, base_url, max_tokens=DEFAULT_N_PREDICT, retries=2,
                  log=None, on_progress=None, stop_event=None,
-                 context_prompt=None, no_context_prompt=None):
+                 context_prompt=None, no_context_prompt=None,
+                 fatal_event=None, speaker_format="label"):
         # Тексты системных промптов приходят снаружи (из папки prompts/).
         if not context_prompt or not no_context_prompt:
             raise ValueError(
@@ -168,14 +188,21 @@ class GemmaTranslator:
         # экземпляром GemmaTranslator, но с одной кнопкой "Остановить" на
         # всех сразу.
         self.stop_event = stop_event
+        # Общий флаг «сервер недоступен»: ставится при первой же ошибке соединения,
+        # после чего все потоки прекращают работу (а в журнал идёт одно сообщение).
+        self.fatal_event = fatal_event
+        self.speaker_format = speaker_format
 
     def stop(self):
         self._stopped = True
 
     def _is_stopped(self):
-        return self._stopped or (self.stop_event is not None and self.stop_event.is_set())
+        return (self._stopped
+                or (self.stop_event is not None and self.stop_event.is_set())
+                or (self.fatal_event is not None and self.fatal_event.is_set()))
 
-    def translate_line(self, previous_source, previous_translation, current_source, rules_name=None):
+    def translate_line(self, previous_source, previous_translation, current_source, rules_name=None,
+                       previous_name=None):
         """Возвращает перевод current_source (уже защищённого маркерами
         текста) или None при неудаче (после исчерпания попыток).
 
@@ -206,7 +233,8 @@ class GemmaTranslator:
                 result = raw_translate(
                     self.base_url, previous_source, previous_translation,
                     current_source, rules_name=rules_name, system_prompt=system_prompt,
-                    max_tokens=self.max_tokens,
+                    max_tokens=self.max_tokens, previous_name=previous_name,
+                    speaker_format=self.speaker_format,
                 )
                 if _looks_like_prompt_leak(result):
                     self.log(
@@ -227,6 +255,15 @@ class GemmaTranslator:
                 self.stats["requests"] += 1
                 self.on_progress()
                 return result
+            except GemmaConnectionError as e:
+                if self.fatal_event is not None:
+                    first = not self.fatal_event.is_set()
+                    self.fatal_event.set()
+                else:
+                    first = True
+                if first:
+                    self.log(str(e))
+                return None
             except GemmaError as e:
                 self.log(
                     tr("Ошибка Translate Gemma (попытка {0}/{1}): {2}.")

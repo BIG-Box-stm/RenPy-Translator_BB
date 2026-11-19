@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 
 import core
+from speaker_mixin import SpeakerMixin
 
 FREE_ENDPOINT = "https://api-free.deepl.com/v2/translate"
 PRO_ENDPOINT = "https://api.deepl.com/v2/translate"
@@ -58,6 +59,10 @@ class RateLimited(Exception):
         self.retry_after = retry_after
 
 
+class ContextRejected(Exception):
+    """DeepL не принял параметр context (например, тариф его не поддерживает)."""
+
+
 class DeepLError(Exception):
     """Ошибка, после которой повторять запрос бессмысленно (неверный
     ключ, исчерпана квота и т.п.) — нужно показать её пользователю."""
@@ -67,22 +72,28 @@ def _endpoint_for_key(api_key):
     return FREE_ENDPOINT if api_key.strip().endswith(":fx") else PRO_ENDPOINT
 
 
-def raw_translate_batch(texts, api_key, src, dest, timeout=15):
+def raw_translate_batch(texts, api_key, src, dest, timeout=15, context=None):
     """Переводит до 50 строк ОДНИМ запросом через официальный batch-режим
     DeepL. Возвращает список переводов той же длины и в том же порядке,
     что texts — DeepL гарантирует это сам, в отличие от нашего трюка с
     разделителем для Google."""
     url = _endpoint_for_key(api_key)
+    # Ключ — ТОЛЬКО в заголовке Authorization: передача auth_key в теле запроса
+    # DeepL отключил (с января 2026 такой запрос получает 403 Forbidden).
     data = [
-        ("auth_key", api_key),
         ("source_lang", _deepl_lang(src).split("-")[0]),  # источник без варианта
         ("target_lang", _deepl_lang(dest)),
     ]
+    if context:
+        # Контекст не переводится и (по документации DeepL) не тарифицируется:
+        # через него передаём имя говорящего для согласования по роду.
+        data.append(("context", context))
     for t in texts:
         data.append(("text", t))
     body = urllib.parse.urlencode(data, doseq=True).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": "DeepL-Auth-Key " + api_key.strip(),
     })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -102,6 +113,8 @@ def raw_translate_batch(texts, api_key, src, dest, timeout=15):
             except Exception:
                 pass
             raise RateLimited(retry_after)
+        if e.code == 400 and context and "context" in body_text.lower():
+            raise ContextRejected(body_text[:200])
         if e.code == 456:
             raise DeepLError(
                 tr("Месячная бесплатная квота DeepL (500 000 символов) исчерпана. "
@@ -117,19 +130,19 @@ def raw_translate_batch(texts, api_key, src, dest, timeout=15):
     return [item["text"] for item in parsed["translations"]]
 
 
-class DeepLTranslator:
+class DeepLTranslator(SpeakerMixin):
     """Тот же интерфейс, что и gtranslate.CachedTranslator (вызываемый
     объект + .stats + .stop() + .warm_batch()), чтобы программа могла
     использовать DeepL и Google Translate как взаимозаменяемые движки."""
 
-    BASE_DELAY = 0.3
+    BASE_DELAY = 0.2
     MAX_DELAY = 4.0
     RATE_LIMIT_COOLDOWN = 15.0
     MAX_COOLDOWN = 60.0
     RECOVERY_STEP = 0.05
     RECOVERY_EVERY = 8
 
-    BATCH_ITEMS = 50       # официальный лимит DeepL за один запрос
+    BATCH_ITEMS = 2        # по умолчанию 2 строки: ключ платный, и битая пачка тратит символы (лимит DeepL — 50)
     BATCH_CHARS = 20000
 
     def __init__(self, api_key, src, dest, cache=None, delay=None, retries=4,
@@ -153,6 +166,11 @@ class DeepLTranslator:
         self._stopped = False
         self._success_streak = 0
         self._fatal_error = None  # DeepLError, после которой дальше не пытаемся
+        self._init_speakers()
+        # Имя говорящего передаётся параметром context; если DeepL его не принял,
+        # переходим на имя в начале каждой строки («Имя: текст»).
+        self._context_ok = True
+        self._net_fail = 0
 
     def stop(self):
         self._stopped = True
@@ -167,48 +185,74 @@ class DeepLTranslator:
         self._success_streak = 0
         self.delay = min(self.MAX_DELAY, self.delay * 1.6 + 0.2)
 
+    CONTEXT_TEMPLATE = "Speaker: {0}"
+
     def __call__(self, text):
-        if self._stopped or self._fatal_error:
-            return text
+        # Уже переведённое берём из кэша и после остановки. Если перевода нет —
+        # возвращаем None (а НЕ исходный текст/ключ): в режиме «Учитывать пол
+        # говорящего» ключ имеет вид «Имя: текст», и его возврат записал бы имя
+        # в игру. core.translate_quoted() на None оставляет строку как есть, и
+        # при следующем запуске она будет переведена заново.
         if text in self.cache:
             self.stats["cache_hits"] += 1
             return self.cache[text]
+        if self._stopped or self._fatal_error:
+            return None
         self._translate_batch_once([text])
-        return self.cache.get(text, text)
+        return self.cache.get(text)
 
     def warm_batch(self, texts):
+        """Пачки собираются из строк одного говорящего; имя уходит в context
+        (без расхода символов), а при отказе DeepL — в начало каждой строки."""
         pending = [t for t in dict.fromkeys(texts) if t not in self.cache]
-        idx = 0
-        while idx < len(pending):
-            if self._stopped or self._fatal_error:
-                return
-            batch = []
-            total_chars = 0
-            while idx < len(pending) and len(batch) < self.BATCH_ITEMS:
-                t = pending[idx]
-                if batch and total_chars + len(t) > self.BATCH_CHARS:
-                    break
-                batch.append(t)
-                total_chars += len(t)
-                idx += 1
-            self._translate_batch_once(batch)
+        for speaker, keys in self._group_by_speaker(pending):
+            idx = 0
+            while idx < len(keys):
+                if self._stopped or self._fatal_error:
+                    return
+                batch = []
+                total_chars = 0
+                while idx < len(keys) and len(batch) < self.BATCH_ITEMS:
+                    k = keys[idx]
+                    n = len(self._split_key(k)[1])
+                    if batch and total_chars + n > self.BATCH_CHARS:
+                        break
+                    batch.append(k)
+                    total_chars += n
+                    idx += 1
+                self._translate_batch_once(batch)
+
+    def _build_request(self, batch):
+        """(тексты для отправки, context или None, режим) для пачки одного говорящего."""
+        speaker = self._split_key(batch[0])[0]
+        texts = [self._split_key(k)[1] for k in batch]
+        if not speaker:
+            return texts, None, "plain"
+        if self._context_ok:
+            return texts, self.CONTEXT_TEMPLATE.format(speaker), "context"
+        return list(batch), None, "prefix"      # ключ уже «Имя: текст»
 
     def _translate_batch_once(self, batch):
         cooldown = self.RATE_LIMIT_COOLDOWN
         for attempt in range(1, self.retries + 1):
             if self._stopped or self._fatal_error:
                 return
+            speaker = self._split_key(batch[0])[0]
+            send, context, mode = self._build_request(batch)
             try:
-                parts = raw_translate_batch(batch, self.api_key, self.src, self.dest)
+                parts = raw_translate_batch(send, self.api_key, self.src, self.dest, context=context)
                 if len(parts) != len(batch):
                     self.log(
                         tr("DeepL вернул неожиданное число строк ({0} вместо {1}) "
                         "— пропускаю эту пачку.").format(len(parts), len(batch))
                     )
                     return
+                if mode == "prefix":
+                    parts = [self._strip_name(self._split_key(k)[0], self._split_key(k)[1], r)
+                             for k, r in zip(batch, parts)]
                 bad = [
-                    src_text for src_text, translated in zip(batch, parts)
-                    if not core.tokens_preserved(src_text, translated)
+                    k for k, translated in zip(batch, parts)
+                    if not core.tokens_preserved(self._split_key(k)[1], translated)
                 ]
                 if bad:
                     # DeepL ответил тем же количеством строк, но потерял или
@@ -230,19 +274,28 @@ class DeepLTranslator:
                         time.sleep(wait)
                         continue
                     return
-                for src_text, translated in zip(batch, parts):
-                    self.cache[src_text] = translated
+                for k, translated in zip(batch, parts):
+                    self.cache[k] = translated
                 self.stats["requests"] += 1
                 if len(batch) > 1:
                     self.stats["batch_requests"] += 1
                     self.stats["batched_lines"] += len(batch)
                 self._note_success()
+                self._net_fail = 0
                 for _ in batch:
                     self.on_progress()
                 sleep_for = self.delay + random.uniform(0, 0.15)
                 if sleep_for:
                     time.sleep(sleep_for)
                 return
+
+            except ContextRejected as e:
+                self._context_ok = False
+                self.log(
+                    tr("DeepL не принял параметр context — перехожу на имя говорящего в начале "
+                    "каждой строки («Имя: текст»).")
+                )
+                continue
 
             except RateLimited as e:
                 self.stats["rate_limit_hits"] += 1
@@ -270,7 +323,12 @@ class DeepLTranslator:
                 time.sleep(wait)
 
         self.stats["errors"] += len(batch)
-        self.log(
-            tr("Не удалось перевести пачку из {0} строк через DeepL, оставляю "
-            "оригинал.").format(len(batch))
-        )
+        self._net_fail += 1
+        if self._net_fail >= 3 and not self._fatal_error:
+            self._fatal_error = RuntimeError(tr("нет связи с DeepL"))
+            self.log(tr("Перевод прерван: {0}.").format(self._fatal_error))
+        else:
+            self.log(
+                tr("Не удалось перевести пачку из {0} строк через DeepL, оставляю "
+                "оригинал.").format(len(batch))
+            )

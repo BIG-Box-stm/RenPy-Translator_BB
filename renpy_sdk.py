@@ -80,17 +80,12 @@ def list_installed_sdks(base_dir):
 
 
 def pick_sdk(installed, game_major):
-    """Самый свежий SDK, подходящий игре с мажорной версией game_major:
-    для Ren'Py 8 и новее — самый свежий SDK 8+, для 7 — самый свежий 7.x,
-    для 6 и старше — самый свежий 6.x. Более новый SDK собирает и более
-    старые игры, поэтому полного совпадения версий не требуется. None —
-    подходящего SDK в списке нет."""
-    if game_major >= 8:
-        pool = [s for s in installed if s["version"][0] >= 8]
-    elif game_major == 7:
-        pool = [s for s in installed if s["version"][0] == 7]
-    else:
-        pool = [s for s in installed if s["version"][0] == 6]
+    """Самый свежий SDK ТОЙ ЖЕ мажорной версии, что и игра: для Ren'Py 7 —
+    самый свежий 7.x, для 8 — самый свежий 8.x, для будущей 9 — 9.x и так
+    далее. SDK другой мажорной версии не подставляется: у разных версий
+    разный Python, и игра, собранная другой версией, может не открыться.
+    None — подходящего SDK в списке нет (тогда GUI предложит выбрать вручную)."""
+    pool = [s for s in installed if s["version"][0] == game_major]
     return max(pool, key=lambda item: item["version"]) if pool else None
 
 

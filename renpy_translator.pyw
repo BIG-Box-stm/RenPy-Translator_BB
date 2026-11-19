@@ -148,7 +148,7 @@ TEST_TEXT = (
 # ввод.
 
 
-# Языки перевода, для которых «Согласование по роду» не имеет смысла (в них
+# Языки перевода, для которых «Учитывать пол говорящего» не имеет смысла (в них
 # глаголы/прилагательные не меняются по роду говорящего) — галочки скрываются.
 NO_GENDER_AGREEMENT_LANGS = {"en", "de", "zh", "zh-cn", "ja", "ko", "tr", "id", "vi"}
 
@@ -189,12 +189,23 @@ ENGINE_DEFAULTS = {
         "batch_chars": deepl_translate.DeepLTranslator.BATCH_CHARS,
         "delay": deepl_translate.DeepLTranslator.BASE_DELAY,
     },
+    # Google с введённым ключом (официальный Cloud Translation API)
+    "google_api": {
+        "batch_items": google_api_translate.GoogleApiTranslator.BATCH_ITEMS,
+        "batch_chars": google_api_translate.GoogleApiTranslator.BATCH_CHARS,
+        "delay": google_api_translate.GoogleApiTranslator.BASE_DELAY,
+    },
     "libretranslate": {
         "batch_items": libretranslate_translate.LibreTranslator.BATCH_ITEMS,
         "batch_chars": libretranslate_translate.LibreTranslator.BATCH_CHARS,
         "delay": libretranslate_translate.LibreTranslator.BASE_DELAY,
     },
 }
+
+
+def _libre_codes(src, dest):
+    """Коды языков LibreTranslate для пары (у пары pt↔es — прямые модели)."""
+    return libretranslate_launcher.libre_codes(src, dest)
 
 
 def _libre_code(code):
@@ -264,6 +275,7 @@ class App(tk.Tk):
         self.google_key_var = tk.StringVar()
         self.libre_url_var = tk.StringVar(value=libretranslate_translate.DEFAULT_URL)
         self.libre_key_var = tk.StringVar()
+        self.google_key_var.trace_add("write", lambda *a: self._refresh_defaults_hint())
         self.marker_var = tk.StringVar(value=tr(core.NO_MARKER_LABEL))
         # Служебное (нередактируемое) поле «Код перевода»: код языка перевода
         # для Ren'Py и имя папки game/tl/<код> (см. _update_lang_code).
@@ -292,8 +304,10 @@ class App(tk.Tk):
         self.gemma4_url_var = tk.StringVar(value=gemma4_translate.DEFAULT_URL)
         # Выбор промпта для нейросетевых движков (см. prompts.py).
         self.prompt_var = tk.StringVar(value=prompts.default_label())
-        # «Согласование по роду» (экспериментально, только Gemma 4).
+        # «Учитывать пол говорящего».
         self.gender_var = tk.BooleanVar(value=False)
+        # «Жёсткое согласование по полу» у Translate Gemma: построчно, «Имя: текст», как у Gemma 4.
+        self.gemma_hard_var = tk.BooleanVar(value=False)
         # Игрок — женский персонаж (в запросе «Player (female)» вместо «Player (male)»).
         self.player_female_var = tk.BooleanVar(value=False)
         # Сохранять ли ключи API (DeepL / Google / LibreTranslate) в файле
@@ -406,7 +420,7 @@ class App(tk.Tk):
         self.api_key_label = ttk.Label(frame_engine, text=tr("Ключ DeepL API:"))
         self.api_key_label.grid(row=0, column=1, sticky="w", padx=(20, 0))
         self.deepl_key_entry = ttk.Entry(
-            frame_engine, textvariable=self.deepl_key_var, width=30, show="•",
+            frame_engine, textvariable=self.deepl_key_var, width=30,
             state="disabled",
         )
         self.deepl_key_entry.grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 0))
@@ -456,6 +470,14 @@ class App(tk.Tk):
             command=self._start_launch_gemma4,
         )
         self.launch_gemma4_btn.grid(row=1, column=4, sticky="w", padx=(16, 0), pady=(2, 0))
+
+        # Очистка кэша выбранного переводчика (для любого движка) — правее кнопки запуска.
+        self.clear_cache_label = ttk.Label(frame_engine, text=tr("Кэш:"))
+        self.clear_cache_label.grid(row=0, column=5, sticky="w", padx=(16, 0))
+        self.clear_cache_btn = ttk.Button(
+            frame_engine, text=tr("Очистить кэш переводчика"), command=self._clear_cache,
+        )
+        self.clear_cache_btn.grid(row=1, column=5, sticky="w", padx=(16, 0), pady=(2, 0))
 
         # Проверка переводчика (для любого движка): ничего не запускает и не
         # меняет, только отправляет тестовую строку и показывает ответ. У
@@ -767,6 +789,8 @@ class App(tk.Tk):
             self._on_engine_changed()
         self.settings["wizard_done"] = True
         self._save_settings()
+        if updates.get("sdk_installed"):
+            self._update_renpy_info()
 
     def _choose_folder(self):
         path = filedialog.askdirectory(title=tr("Выберите папку игры"))
@@ -819,7 +843,7 @@ class App(tk.Tk):
             raise ValueError(tr("«{0}» должно быть целым числом.").format(field_label))
 
     # ------------------------------------------------------------------
-    # Чек-бокс «Переводить имена» — подменяет/возвращает имена персонажей
+    # Чек-бокс «Применить локализованные имена» — подменяет/возвращает имена персонажей
     # (и, где задан свой шрифт, шрифт для имени) прямо в исходниках игры.
     # Срабатывает сразу по клику, а не при "Начать перевод" — см.
     # обсуждение в handoff-документе.
@@ -860,6 +884,15 @@ class App(tk.Tk):
                     light_font = game_patcher.find_light_font(self.fonts_bundle_dir)
                 except game_patcher.FontsNotFoundError as e:
                     self._log(tr("ОШИБКА: {0}").format(e))
+
+            if light_font and not os.path.isfile(
+                    os.path.join(self.game_dir, *light_font.split("/"))):
+                self._log(
+                    tr("Запасной шрифт {0} не найден в папке игры — нажмите «Обновить "
+                    "шрифты, включить язык», затем включите галочку заново. Шрифты имён "
+                    "персонажей со своим who_font пока не меняются.").format(light_font)
+                )
+                light_font = None
 
             self._log(
                 tr("{0} имена персонажей ({1} записей в файле)...")
@@ -1075,11 +1108,24 @@ class App(tk.Tk):
         if show_gemma or show_gemma4:
             self.batch_defaults_label.configure(text="")
         else:
+            self._refresh_defaults_hint()
+
+    def _refresh_defaults_hint(self):
+        """Подсказка «по умолчанию» под полями пачки/задержки. У Google она
+        зависит от того, введён ли ключ API (с ключом — свои значения)."""
+        try:
+            key = self._current_engine_key()
+            if key not in ENGINE_DEFAULTS and key != "google":
+                return
+            if key == "google" and self.google_key_var.get().strip():
+                key = "google_api"
             d = ENGINE_DEFAULTS[key]
             self.batch_defaults_label.configure(
                 text=tr("по умолчанию:   {0} строк / {1} симв.   {2} с")
                 .format(d["batch_items"], d["batch_chars"], d["delay"])
             )
+        except (tk.TclError, AttributeError):
+            pass
 
     def _update_lang_code(self):
         """Подставляет в «Код перевода» код выбранного «Языка перевода»."""
@@ -1218,7 +1264,17 @@ class App(tk.Tk):
             return
         ui_editor.EditorWindow(
             self, lang_dir, lang_folder, log=self._log,
-            dest_code=lang_code(self.dest_lang_var.get(), "ru"))
+            dest_code=lang_code(self.dest_lang_var.get(), "ru"),
+            export_dir=self.script_dir, prompt_loader=self._export_prompt)
+
+    def _export_prompt(self):
+        """(текст выбранного в главном окне промпта | None, язык оригинала, язык
+        перевода) — для файла экспорта строк из «Редактора переводов»."""
+        src = lang_code(self.src_lang_var.get(), "en")
+        dest = lang_code(self.dest_lang_var.get(), "ru")
+        filename = prompts.file_for_label(self.prompt_var.get())
+        text = prompts.load_file(filename, log=self._log, src_lang=src, dest_lang=dest) if filename else None
+        return text, src, dest
 
     def _refresh_prompt_list(self):
         """Обновляет выпадающий список «Промпт» по файлам *.txt в папке
@@ -1306,7 +1362,11 @@ class App(tk.Tk):
         if not self._apply_marker_setting():
             return
 
-        if engine == "gemma":
+        # «Жёсткое согласование по полу»: Translate Gemma работает построчно, как Gemma 4.
+        hard_gemma = (engine == "gemma" and self._gender_applicable()
+                      and bool(self.gemma_hard_var.get()))
+
+        if engine == "gemma" and not hard_gemma:
             try:
                 gemma_np = self._int_or_default(
                     self.gemma_np_var.get(), translate_gemma.DEFAULT_NP, tr("Число потоков")
@@ -1351,41 +1411,71 @@ class App(tk.Tk):
             return
 
         gemma4_cfg = None
-        if engine == "gemma4":
+        gender_cfg = None
+        if engine == "gemma4" or hard_gemma:
             try:
-                g4_np = self._int_or_default(
-                    self.gemma4_np_var.get(), gemma4_translate.DEFAULT_NP, tr("Число потоков"))
-                g4_n = self._int_or_default(
-                    self.gemma4_ntokens_var.get(), gemma4_translate.DEFAULT_N_PREDICT,
-                    tr("Токенов в ответе (max)"))
+                if hard_gemma:
+                    g4_np = self._int_or_default(
+                        self.gemma_np_var.get(), translate_gemma.DEFAULT_NP, tr("Число потоков"))
+                    g4_n = self._int_or_default(
+                        self.gemma_ntokens_var.get(), translate_gemma.DEFAULT_N_PREDICT,
+                        tr("Токенов в ответе (max)"))
+                else:
+                    g4_np = self._int_or_default(
+                        self.gemma4_np_var.get(), gemma4_translate.DEFAULT_NP, tr("Число потоков"))
+                    g4_n = self._int_or_default(
+                        self.gemma4_ntokens_var.get(), gemma4_translate.DEFAULT_N_PREDICT,
+                        tr("Токенов в ответе (max)"))
             except ValueError as e:
                 messagebox.showerror(tr("Неверное значение"), str(e))
                 return
-            gender_mode = self._gender_applicable() and bool(self.gender_var.get())
+            gender_mode = hard_gemma or (self._gender_applicable() and bool(self.gender_var.get()))
             player_female = gender_mode and bool(self.player_female_var.get())
             prompt_file, prompt_text = self._load_selected_prompt(src_code, dest_code)
             if prompt_text is None:
                 return
             if gender_mode:
                 self._log(
-                    tr("Режим «Согласование по роду»: строки уходят как «Имя: текст» "
+                    tr("Режим «Учитывать пол говорящего»: строки уходят как «Имя: текст» "
                     "(имя нужно модели для определения пола говорящего). Игрок: {0}.")
                     .format(tr("женский (Player (female))") if player_female
                             else tr("мужской (Player (male))"))
                 )
+            if hard_gemma:
+                url = self.gemma_url_var.get().strip() or translate_gemma.DEFAULT_URL
+            else:
+                url = self.gemma4_url_var.get().strip() or gemma4_translate.DEFAULT_URL
             gemma4_cfg = {
-                "url": self.gemma4_url_var.get().strip() or gemma4_translate.DEFAULT_URL,
+                "url": url,
                 "np": max(1, g4_np),
                 "gender": gender_mode,
                 "player_gender": "female" if player_female else "male",
                 "n_predict": g4_n,
                 "prompt": prompt_text,
-                # Свой кэш на каждый промпт (и на каждую правку его текста).
-                "cache_tag": "{0}p_{1}_{2}".format(
-                    "g" if gender_mode else "",
-                    re.sub(r"\W+", "_", os.path.splitext(prompt_file)[0]),
-                    hashlib.sha1(prompt_text.encode("utf-8")).hexdigest()[:8]),
+                # Кэш — один на движок, без привязки к выбранному промпту.
+                "cache_file": project.CACHE_FILENAME_TRANSLATEGEMMA if hard_gemma else None,
+                "title": "Translate Gemma" if hard_gemma else "Gemma 4",
             }
+        elif engine in ("google", "deepl", "libretranslate") and self._gender_applicable() \
+                and bool(self.gender_var.get()):
+            # «Учитывать пол говорящего» у онлайн-переводчиков: реплики одного говорящего
+            # идут вместе, имя ставится один раз (Google — в начале объединённого текста,
+            # DeepL — параметром context, Libre — в начале каждой строки).
+            player_female = bool(self.player_female_var.get())
+            gender_cfg = {"player_gender": "female" if player_female else "male", "engine": engine}
+            where = {
+                "google": (tr("в начале объединённого текста реплик")
+                           if self.settings.get("google_speaker_join") == "inline"
+                           else tr("в начале каждой строки")),
+                "deepl": tr("через параметр context (без расхода символов)"),
+                "libretranslate": tr("в начале каждой строки"),
+            }[engine]
+            self._log(
+                tr("Режим «Учитывать пол говорящего»: реплики группируются по говорящему, имя "
+                "передаётся переводчику {0}. Игрок: {1}.").format(
+                    where,
+                    tr("женский") if player_female else tr("мужской"))
+            )
 
         deepl_key = self.deepl_key_var.get().strip()
         google_key = self.google_key_var.get().strip()
@@ -1412,8 +1502,8 @@ class App(tk.Tk):
         libre_url = self.libre_url_var.get().strip() or libretranslate_translate.DEFAULT_URL
         libre_key = self.libre_key_var.get().strip()
         if engine == "libretranslate":
-            ok, why = libretranslate_translate.pair_status(
-                libre_url, _libre_code(src_code), _libre_code(dest_code))
+            _ls, _ld = _libre_codes(src_code, dest_code)
+            ok, why = libretranslate_translate.pair_status(libre_url, _ls, _ld)
             if ok is False:
                 need = ",".join(libretranslate_launcher.languages_for_pair(src_code, dest_code))
                 messagebox.showerror(
@@ -1427,8 +1517,9 @@ class App(tk.Tk):
 
         batch_items_raw = self.batch_items_var.get().strip()
         batch_delay_raw = self.batch_delay_var.get().strip()
-        if engine == "gemma4":
-            # У Gemma 4 этих полей в интерфейсе нет (скрыты) — не проверяем.
+        if engine in ("gemma", "gemma4"):
+            # У Translate Gemma и Gemma 4 этих полей в интерфейсе нет (скрыты,
+            # пачек и задержки у них нет) — не проверяем.
             batch_items_raw = batch_delay_raw = ""
         batch_items = None
         batch_delay = None
@@ -1470,8 +1561,9 @@ class App(tk.Tk):
         self.worker_thread = threading.Thread(
             target=self._worker,
             args=(lang_dir, files, src_code, dest_code, overwrite, use_cache,
-                  engine, google_key if engine == "google" else deepl_key,
-                  libre_url, libre_key, batch_items, batch_delay, gemma4_cfg),
+                  "gemma4" if hard_gemma else engine,
+                  google_key if engine == "google" else deepl_key,
+                  libre_url, libre_key, batch_items, batch_delay, gemma4_cfg, gender_cfg),
             daemon=True,
         )
         self.worker_thread.start()
@@ -1482,7 +1574,7 @@ class App(tk.Tk):
             self.translator.stop()
         if self._gemma_stop_event is not None:
             self._gemma_stop_event.set()
-        self._log(tr("Останавливаю после текущего файла..."))
+        self._log(tr("Останавливаю..."))
 
     def _on_finished(self):
         self.start_btn.configure(state="normal")
@@ -1606,7 +1698,7 @@ class App(tk.Tk):
     def _settings_vars(self):
         """Переменные окна, которые запоминаются между запусками
         (ключ в файле настроек -> переменная). Не запоминаются: галочка
-        «Переводить имена» (по задумке — только руками) и отдельные
+        «Применить локализованные имена» (по задумке — только руками) и отдельные
         временные состояния. Ключи API — отдельно, по галочке."""
         return {
             "batch_items": self.batch_items_var, "batch_delay": self.batch_delay_var,
@@ -1622,7 +1714,7 @@ class App(tk.Tk):
             "gemma4_np": self.gemma4_np_var, "gemma4_ctx": self.gemma4_ctx_var,
             "gemma4_ntokens": self.gemma4_ntokens_var, "gemma4_mtp": self.gemma4_mtp_var,
             "gemma4_model_path": self.gemma4_model_path_var,
-            "gender": self.gender_var,
+            "gender": self.gender_var, "gemma_hard": self.gemma_hard_var,
             "player_female": self.player_female_var,
             "remember_keys": self.remember_keys_var,
         }
@@ -1857,6 +1949,7 @@ class App(tk.Tk):
                 return
             cfg["prompt"] = prompt_text
 
+        cfg["engine_title"] = self.engine_var.get()     # Tk-переменные — только в главном потоке
         self._test_seq += 1
         seq = self._test_seq
         dlg = tk.Toplevel(self)
@@ -1886,7 +1979,7 @@ class App(tk.Tk):
                     [TEST_TEXT], cfg["key"], src, dest, timeout=60)[0]
             elif engine == "libretranslate":
                 answer = libretranslate_translate.raw_translate_batch(
-                    [TEST_TEXT], cfg["url"], _libre_code(src), _libre_code(dest),
+                    [TEST_TEXT], cfg["url"], *_libre_codes(src, dest),
                     cfg.get("key") or None, timeout=120)[0]
             elif engine == "gemma":
                 answer, info = translate_gemma.raw_translate(
@@ -1902,7 +1995,7 @@ class App(tk.Tk):
         elapsed = time.monotonic() - t0
 
         lines = [
-            tr("Переводчик: {0}").format(self.engine_var.get()),
+            tr("Переводчик: {0}").format(cfg["engine_title"]),
             tr("Языки: {0} → {1}").format(src, dest),
             tr("Время обработки: {0:.2f} с").format(elapsed),
         ]
@@ -1973,27 +2066,72 @@ class App(tk.Tk):
             pass   # окно уже закрыто
 
     def _gender_applicable(self):
-        """Режим «Согласование по роду» имеет смысл только для Gemma 4 и только
-        для языков перевода, где слова меняются по роду говорящего."""
-        if self._current_engine_key() != "gemma4":
+        """Учёт пола говорящего имеет смысл для Gemma 4, Translate
+        Gemma («жёсткое»), Google, DeepL и LibreTranslate — и только для языков
+        перевода, где слова меняются по роду (см. NO_GENDER_AGREEMENT_LANGS)."""
+        if self._current_engine_key() not in ("gemma4", "gemma", "google", "deepl", "libretranslate"):
             return False
         dest = lang_code(self.dest_lang_var.get(), "ru").lower()
         return dest not in NO_GENDER_AGREEMENT_LANGS
 
+    def _active_gender_var(self):
+        return self.gemma_hard_var if self._current_engine_key() == "gemma" else self.gender_var
+
     def _update_gender_widgets(self):
-        """Галочки «Согласование по роду» и «Player — female» показываются
-        только для Gemma 4 и языков перевода, где это нужно (см.
-        NO_GENDER_AGREEMENT_LANGS); в остальных случаях скрыты и на перевод не
-        влияют. «Player — female» доступна только при включённом согласовании."""
+        """Галочка согласования по роду («Учитывать пол говорящего»; у Translate
+        Gemma — «Жёсткое согласование по полу») и «Игрок — женский персонаж»
+        показываются только для подходящих движков и языков перевода; в остальных
+        случаях скрыты и на перевод не влияют. «Игрок — женский персонаж»
+        доступна только при включённом согласовании."""
         if self._gender_applicable():
+            var = self._active_gender_var()
+            hard = self._current_engine_key() == "gemma"
+            self.gender_check.configure(
+                variable=var, state="normal",
+                text=tr("Жёсткое согласование по полу") if hard else tr("Учитывать пол говорящего"))
             self.gender_check.grid()
             self.player_female_check.grid()
-            self.gender_check.configure(state="normal")
-            self.player_female_check.configure(
-                state="normal" if self.gender_var.get() else "disabled")
+            self.player_female_check.configure(state="normal" if var.get() else "disabled")
         else:
             self.gender_check.grid_remove()
             self.player_female_check.grid_remove()
+
+    # ------------------------------------------------------------------
+    # Очистка кэша выбранного переводчика
+    # ------------------------------------------------------------------
+    def _clear_cache(self):
+        lang_dir = self._lang_dir_or_warn()
+        if not lang_dir:
+            return
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            messagebox.showinfo(
+                tr("Идёт перевод"),
+                tr("Пока идёт перевод, кэш очистить нельзя. Дождитесь окончания или нажмите «Остановить»."))
+            return
+        engine = self._current_engine_key()
+        files = project.cache_files_of(lang_dir, engine)
+        title = engine_display(engine)
+        if not files:
+            messagebox.showinfo(
+                tr("Очистить кэш переводчика"),
+                tr("У переводчика «{0}» в этой игре нет файлов кэша.").format(title))
+            return
+        listing = "\n".join("• " + os.path.basename(f) for f in files)
+        if not messagebox.askyesno(
+            tr("Очистить кэш переводчика"),
+            tr("Будут удалены файлы кэша переводчика «{0}» для этой игры:\n\n{1}\n\nПереведённые "
+               "строки в файлах игры не изменятся, но при следующем запуске переводчику придётся "
+               "переводить их заново. Продолжить?").format(title, listing),
+        ):
+            return
+        removed = 0
+        for f in files:
+            try:
+                os.remove(f)
+                removed += 1
+            except Exception as e:
+                self._log(tr("Не удалось удалить {0}: {1}").format(os.path.basename(f), e))
+        self._log(tr("Кэш переводчика «{0}» очищен: удалено файлов — {1}.").format(title, removed))
 
     # ------------------------------------------------------------------
     # Версия Ren'Py игры и выбор SDK
@@ -2051,7 +2189,7 @@ class App(tk.Tk):
                 tr("Игра сделана на Ren'Py {0}, но в папке «{1}» нет подходящего "
                 "SDK (нужен SDK версии {2}).").format(
                     ver_text, renpy_sdk.SDK_BASE_FOLDER_NAME,
-                    tr("8 или новее") if version[0] >= 8 else str(max(version[0], 6)))
+                    str(version[0]))
             )
         else:
             reason = tr("Не удалось автоматически определить версию Ren'Py этой игры.")
@@ -2117,12 +2255,12 @@ class App(tk.Tk):
         self.status_var.set(tr("Генерирую файлы перевода через Ren'Py SDK..."))
         self._log(sdk_info)
         threading.Thread(
-            target=self._generate_tl_worker, args=(sdk_dir, renpy_lang), daemon=True,
+            target=self._generate_tl_worker,
+            args=(sdk_dir, renpy_lang, self.project_path.get()), daemon=True,
         ).start()
 
-    def _generate_tl_worker(self, sdk_dir, renpy_lang):
+    def _generate_tl_worker(self, sdk_dir, renpy_lang, project_dir):
         try:
-            project_dir = self.project_path.get()
             self._log(
                 tr("Запускаю Ren'Py SDK для генерации файлов перевода "
                 "(язык: {0})...").format(renpy_lang)
@@ -2328,8 +2466,7 @@ class App(tk.Tk):
             #    их нет — скачиваем (каждая около 100 МБ, нужен интернет).
             try:
                 argos_packages.ensure_pair(
-                    libretranslate_launcher.libre_code(src),
-                    libretranslate_launcher.libre_code(dest), log=self._log)
+                    *libretranslate_launcher.libre_codes(src, dest), log=self._log)
             except argos_packages.ArgosError as e:
                 self._log(tr("ОШИБКА: {0}").format(e))
                 self._log(tr("Языковые пакеты не готовы — LibreTranslate не запущен."))
@@ -2431,41 +2568,51 @@ class App(tk.Tk):
         self.wait_window(dlg)
         return result["name"]
 
+    def _collect_llama_params(self, model_var, ngl_var, np_var, ctx_var, n_var, url_var, defaults):
+        """Читает поля запуска llama-server В ГЛАВНОМ ПОТОКЕ (переменные Tk из
+        фоновых потоков читать небезопасно) и проверяет их. None — ошибка (сообщение
+        уже показано). defaults — модуль со значениями по умолчанию."""
+        folder = self.gemma_llama_folder_var.get().strip()
+        if not folder:
+            messagebox.showerror(
+                tr("Ошибка"), tr("Укажите папку llama.cpp (там, где лежит llama-server.exe)."))
+            return None
+        try:
+            return {
+                "folder": folder,
+                "model_path": model_var.get().strip(),
+                "ngl": self._int_or_default(ngl_var.get(), defaults.DEFAULT_NGL, tr("Загрузка GPU")),
+                "np": self._int_or_default(np_var.get(), defaults.DEFAULT_NP, tr("Число потоков")),
+                "ctx": self._int_or_default(ctx_var.get(), defaults.DEFAULT_CTX, tr("Контекстное окно")),
+                "n_predict": self._int_or_default(
+                    n_var.get(), defaults.DEFAULT_N_PREDICT, tr("Токенов в ответе (max)")),
+                "base_url": url_var.get().strip() or defaults.DEFAULT_URL,
+            }
+        except ValueError as e:
+            messagebox.showerror(tr("Неверное значение"), str(e))
+            return None
+
     def _start_launch_gemma(self):
         prep = self._prepare_mtp(self.gemma_mtp_var, self.gemma_model_path_var,
                                  translate_gemma.DEFAULT_MTP)
         if prep is None:
             return
         mtp, mtp_path = prep
+        params = self._collect_llama_params(
+            self.gemma_model_path_var, self.gemma_ngl_var, self.gemma_np_var,
+            self.gemma_ctx_var, self.gemma_ntokens_var, self.gemma_url_var, translate_gemma)
+        if params is None:
+            return
         self.launch_gemma_btn.configure(state="disabled")
         threading.Thread(
-            target=self._launch_gemma_worker, args=(mtp, mtp_path), daemon=True,
+            target=self._launch_gemma_worker, args=(params, mtp, mtp_path), daemon=True,
         ).start()
 
-    def _launch_gemma_worker(self, mtp=0, mtp_path=None):
+    def _launch_gemma_worker(self, params, mtp=0, mtp_path=None):
         try:
-            folder = self.gemma_llama_folder_var.get().strip()
-            if not folder:
-                raise gemma_launcher.GemmaLauncherError(
-                    tr("Укажите папку llama.cpp (там, где лежит llama-server.exe).")
-                )
-            model_path = self.gemma_model_path_var.get().strip()
-            ngl = self._int_or_default(
-                self.gemma_ngl_var.get(), translate_gemma.DEFAULT_NGL, tr("Загрузка GPU")
-            )
-            gemma_np = self._int_or_default(
-                self.gemma_np_var.get(), translate_gemma.DEFAULT_NP, tr("Число потоков")
-            )
-            ctx = self._int_or_default(
-                self.gemma_ctx_var.get(), translate_gemma.DEFAULT_CTX, tr("Контекстное окно")
-            )
-            n_predict = self._int_or_default(
-                self.gemma_ntokens_var.get(), translate_gemma.DEFAULT_N_PREDICT,
-                tr("Токенов в ответе (max)"),
-            )
-            base_url = self.gemma_url_var.get().strip() or translate_gemma.DEFAULT_URL
             gemma_launcher.launch(
-                folder, model_path, ngl, gemma_np, ctx, n_predict, base_url, log=self._log,
+                params["folder"], params["model_path"], params["ngl"], params["np"],
+                params["ctx"], params["n_predict"], params["base_url"], log=self._log,
                 mtp_tokens=mtp, mtp_path=mtp_path,
             )
             if mtp:
@@ -2476,7 +2623,7 @@ class App(tk.Tk):
                 "в нём сообщения о готовности сервера, прежде чем начинать "
                 "перевод — загрузка модели в память может занять время.")
             )
-        except (gemma_launcher.GemmaLauncherError, ValueError) as e:
+        except gemma_launcher.GemmaLauncherError as e:
             self._log(tr("ОШИБКА: {0}").format(e))
         except Exception as e:
             self._log(tr("Неожиданная ошибка при запуске Translate Gemma: {0}").format(e))
@@ -2493,31 +2640,21 @@ class App(tk.Tk):
         if prep is None:
             return
         mtp, mtp_path = prep
+        params = self._collect_llama_params(
+            self.gemma4_model_path_var, self.gemma4_ngl_var, self.gemma4_np_var,
+            self.gemma4_ctx_var, self.gemma4_ntokens_var, self.gemma4_url_var, gemma4_translate)
+        if params is None:
+            return
         self.launch_gemma4_btn.configure(state="disabled")
         threading.Thread(
-            target=self._launch_gemma4_worker, args=(mtp, mtp_path), daemon=True,
+            target=self._launch_gemma4_worker, args=(params, mtp, mtp_path), daemon=True,
         ).start()
 
-    def _launch_gemma4_worker(self, mtp=0, mtp_path=None):
+    def _launch_gemma4_worker(self, params, mtp=0, mtp_path=None):
         try:
-            folder = self.gemma_llama_folder_var.get().strip()
-            if not folder:
-                raise gemma_launcher.GemmaLauncherError(
-                    tr("Укажите папку llama.cpp (там, где лежит llama-server.exe).")
-                )
-            model_path = self.gemma4_model_path_var.get().strip()
-            ngl = self._int_or_default(
-                self.gemma4_ngl_var.get(), gemma4_translate.DEFAULT_NGL, tr("Загрузка GPU"))
-            np_ = self._int_or_default(
-                self.gemma4_np_var.get(), gemma4_translate.DEFAULT_NP, tr("Число потоков"))
-            ctx = self._int_or_default(
-                self.gemma4_ctx_var.get(), gemma4_translate.DEFAULT_CTX, tr("Контекстное окно"))
-            n_predict = self._int_or_default(
-                self.gemma4_ntokens_var.get(), gemma4_translate.DEFAULT_N_PREDICT,
-                tr("Токенов в ответе (max)"))
-            base_url = self.gemma4_url_var.get().strip() or gemma4_translate.DEFAULT_URL
             gemma_launcher.launch(
-                folder, model_path, ngl, np_, ctx, n_predict, base_url, log=self._log,
+                params["folder"], params["model_path"], params["ngl"], params["np"],
+                params["ctx"], params["n_predict"], params["base_url"], log=self._log,
                 extra_args=gemma4_translate.EXTRA_SERVER_ARGS, mtp_tokens=mtp,
                 mtp_path=mtp_path,
             )
@@ -2532,7 +2669,7 @@ class App(tk.Tk):
                 "один порт по умолчанию.").format(
                     tr(", MTP: {0} токенов").format(mtp) if mtp else "")
             )
-        except (gemma_launcher.GemmaLauncherError, ValueError) as e:
+        except gemma_launcher.GemmaLauncherError as e:
             self._log(tr("ОШИБКА: {0}").format(e))
         except Exception as e:
             self._log(tr("Неожиданная ошибка при запуске Gemma 4: {0}").format(e))
@@ -2626,32 +2763,52 @@ class App(tk.Tk):
             )
             ctx = self._cache_ctx
             if ctx:
-                project.save_cache(*ctx)
+                project.save_cache(*ctx[:3])
+                if len(ctx) > 3 and ctx[3]:
+                    project.save_cache(ctx[0], ctx[3][0], ctx[3][1])
                 self._log(tr("Уже переведённые строки сохранены в кэш."))
         finally:
             self.log_queue.put("__DONE__")
 
     def _worker_impl(self, lang_dir, files, src_code, dest_code, overwrite, use_cache,
                      engine, api_key, libre_url, libre_key, batch_items=None,
-                     batch_delay=None, gemma4_cfg=None):
+                     batch_delay=None, gemma4_cfg=None, gender_cfg=None):
         cache_names = {
             "google": project.CACHE_FILENAME,
             "deepl": project.CACHE_FILENAME_DEEPL,
             "libretranslate": project.CACHE_FILENAME_LIBRE,
         }
         if gemma4_cfg:
-            cache_names["gemma4"] = project.CACHE_FILENAME_GEMMA4.format(tag=gemma4_cfg["cache_tag"])
+            # Один общий кэш на движок — без привязки к выбранному промпту.
+            cache_names["gemma4"] = gemma4_cfg.get("cache_file") or project.CACHE_FILENAME_GEMMA4
         engine_titles = {
             "google": "Google Translate",
             "deepl": "DeepL",
             "libretranslate": "LibreTranslate",
-            "gemma4": "Gemma 4",
+            "gemma4": (gemma4_cfg or {}).get("title", "Gemma 4"),
         }
         cache_name = cache_names[engine]
-        cache = project.load_cache(lang_dir, cache_name) if use_cache else {}
+        if use_cache and cache_name == project.CACHE_FILENAME_GEMMA4:
+            cache = project.load_gemma4_cache(lang_dir, self._log)    # + разовое слияние старых кэшей
+        else:
+            cache = project.load_cache(lang_dir, cache_name) if use_cache else {}
+        # Бесплатный Google: строки, которые он стабильно возвращает с испорченным
+        # тегом/подстановкой, помечаются «непереводимыми для этого переводчика» и
+        # запоминаются в отдельном файле (для остальных переводчиков не действует).
+        free_google = engine == "google" and not api_key
+        unfit_name = project.CACHE_FILENAME_GOOGLE_UNFIT
+        unfit = project.load_cache(lang_dir, unfit_name) if (free_google and use_cache) else {}
+        if not isinstance(unfit, dict):
+            unfit = {}
+
+        def save_caches():
+            project.save_cache(lang_dir, cache, cache_name)
+            if free_google:
+                project.save_cache(lang_dir, unfit, unfit_name)
+
         # Нужен обёртке _worker: если поток упадёт с неожиданной ошибкой,
         # уже переведённое всё равно сохранится в кэш.
-        self._cache_ctx = (lang_dir, cache, cache_name) if use_cache else None
+        self._cache_ctx = (lang_dir, cache, cache_name, (unfit, unfit_name) if free_google else None) if use_cache else None
 
         # Периодически сохраняем кэш во время работы, чтобы при остановке
         # посреди большого файла переведённые строки не терялись.
@@ -2667,7 +2824,7 @@ class App(tk.Tk):
         def on_progress():
             progress_counter["n"] += 1
             if use_cache and progress_counter["n"] % 15 == 0:
-                project.save_cache(lang_dir, cache, cache_name)
+                save_caches()
             phase1_done["n"] += 1
             n, total = phase1_done["n"], phase1_total["n"]
             # Общий прогресс — только в полосе прогресса.
@@ -2701,7 +2858,8 @@ class App(tk.Tk):
             )
         elif engine == "libretranslate":
             translator = libretranslate_translate.LibreTranslator(
-                base_url=libre_url, src=_libre_code(src_code), dest=_libre_code(dest_code),
+                base_url=libre_url, src=_libre_codes(src_code, dest_code)[0],
+                dest=_libre_codes(src_code, dest_code)[1],
                 api_key=(libre_key or None), cache=cache,
                 log=self._log, on_progress=on_progress,
                 delay=batch_delay, batch_items=batch_items,
@@ -2723,12 +2881,14 @@ class App(tk.Tk):
                 api_key=api_key, src=src_code, dest=dest_code, cache=cache,
                 log=self._log, on_progress=on_progress,
                 delay=batch_delay, batch_items=batch_items,
+                speaker_join=self.settings.get("google_speaker_join"),
             )
         else:
             translator = gtranslate.CachedTranslator(
                 src=src_code, dest=dest_code, cache=cache,
                 log=self._log, on_progress=on_progress,
-                delay=batch_delay, batch_items=batch_items,
+                delay=batch_delay, batch_items=batch_items, unfit=unfit,
+                speaker_join=self.settings.get("google_speaker_join"),
             )
         self.translator = translator
 
@@ -2742,10 +2902,13 @@ class App(tk.Tk):
         def protected_for(path):
             return manual.get(editor_store.rel_of(lang_dir, path))
 
-        # --- Режим «Согласование по роду» (только Gemma 4): в запрос
-        # добавляется имя говорящего из define ... = Character(...). -----
+        # --- Режим «Учитывать пол говорящего»: в запрос добавляется имя говорящего из
+        # define ... = Character(...). Gemma 4 / Translate Gemma («жёсткое») получают
+        # «Имя: текст» построчно; Google, DeepL и LibreTranslate — реплики одного
+        # говорящего вместе (см. speaker_mixin.py). ----------------------
         key_fn = resolve_fn = None
-        if gemma4_cfg and gemma4_cfg.get("gender"):
+        speaker_cfg = gemma4_cfg if (gemma4_cfg and gemma4_cfg.get("gender")) else gender_cfg
+        if speaker_cfg:
             names = {}
             if self.game_dir:
                 try:
@@ -2755,8 +2918,7 @@ class App(tk.Tk):
             self._log(tr("Найдено определений персонажей: {0}.").format(len(names)))
             key_fn = translator.key_for
             # Уже переведённые имена персонажей (_character_names.txt) —
-            # чтобы срезать их из ответа модели, даже если в самой реплике
-            # есть двоеточие.
+            # чтобы срезать их из ответа, даже если в самой реплике есть двоеточие.
             try:
                 names_file = os.path.join(lang_dir, character_names.NAMES_FILENAME)
                 for e in character_names.parse_names_file(names_file):
@@ -2764,9 +2926,19 @@ class App(tk.Tk):
                         translator.add_known_prefix(e["old"], e["new"])
             except Exception as e:
                 self._log(tr("  Не удалось прочитать файл имён: {0}").format(e))
-            _player_gender = gemma4_cfg.get("player_gender", "male")
-            resolve_fn = lambda who: character_names.speaker_label_for_gender(
-                who, names, _player_gender)
+            _player_gender = speaker_cfg.get("player_gender", "male")
+            if gender_cfg:
+                # Онлайн-переводчики: игрок — нейтральная метка-имя (потом срезается).
+                _neutral = {"male": "John", "female": "Anna"}
+
+                def resolve_fn(who, _names=names, _g=_player_gender):
+                    label = character_names.speaker_label_for_gender(who, _names, _g)
+                    if label and label.startswith(character_names.PLAYER_PLACEHOLDER + " ("):
+                        return _neutral[_g]
+                    return label
+            else:
+                resolve_fn = lambda who: character_names.speaker_label_for_gender(
+                    who, names, _player_gender)
 
         # --- Фаза 1: читаем все файлы и собираем уникальные строки,
         # которые нужно перевести, чтобы перевести их пачками (несколько
@@ -2786,10 +2958,16 @@ class App(tk.Tk):
                 protected=protected_for(path))
 
         already_cached = sum(1 for t in all_needed if t in cache)
+        already_unfit = sum(1 for t in all_needed if t in unfit and t not in cache)
         self._log(
             tr("Найдено уникальных строк для перевода: {0} (из них уже в кэше: {1}).")
             .format(len(all_needed), already_cached)
         )
+        if already_unfit:
+            self._log(
+                tr("Из них помечены непереводимыми для бесплатного Google (по прошлым запускам): {0} — "
+                "они пропускаются.").format(already_unfit)
+            )
         # Gemma 4 переводит долго (десятки тысяч строк — часы), поэтому для
         # неё перевод идёт ФАЙЛ ЗА ФАЙЛОМ и результат записывается в .rpy
         # сразу после каждого файла, а не после перевода всей игры (иначе
@@ -2797,6 +2975,11 @@ class App(tk.Tk):
         # хотя переводы лежат в кэше). Пакетные движки (Google/DeepL/Libre)
         # быстрые и выигрывают от общих больших пачек, у них схема прежняя.
         incremental = engine == "gemma4"
+        aborted = False     # нет соединения с переводчиком: дальше не пытаемся
+
+        def fatal():
+            return getattr(translator, "_fatal_error", None)
+
         if all_needed:
             if incremental:
                 self._log(
@@ -2810,14 +2993,15 @@ class App(tk.Tk):
             # уже лежащие в кэше, on_progress не вызывают — если включить
             # их в общее число, полоса прогресса не дойдёт до конца, а
             # прогноз времени будет завышен.
-            pending = len(all_needed) - already_cached
+            pending = len(all_needed) - already_cached - already_unfit
             phase1_total["n"] = pending
             if pending > 0:
                 self.log_queue.put(("__PHASE1_PROGRESS__", 0, pending))
             if not incremental:
                 translator.warm_batch(all_needed)
                 if use_cache:
-                    project.save_cache(lang_dir, cache, cache_name)
+                    save_caches()
+                aborted = bool(fatal()) and not self.stop_requested
                 self._log(
                     tr("Пакетный перевод завершён: запросов к {0} — {1} "
                     "(из них пакетных — {2}, ими переведено {3} строк), "
@@ -2855,14 +3039,21 @@ class App(tk.Tk):
                         done=0, total=len([t for t in file_needed if t not in cache]),
                         t=time.monotonic(), tokens=getattr(translator, "tokens_total", 0) or 0)
                     translator.warm_batch(file_needed)
+                    if fatal() and not self.stop_requested:
+                        aborted = True
+                silent = aborted or (incremental and self.stop_requested)
                 new_lines = core.process_lines(
                     lines, translator, overwrite=overwrite, stats=file_stats,
-                    log=(lambda m: None) if (incremental and self.stop_requested) else self._log,
+                    log=(lambda m: None) if silent else self._log,
                     file_name=rel, key_fn=key_fn, resolve_fn=resolve_fn,
                     protected=protected_for(path),
                 )
                 if file_stats["translated"] > 0:
                     project.write_lines(path, new_lines)
+                if silent:
+                    # После «Остановить» или обрыва связи оставшиеся строки не переведены
+                    # не из-за сбоя самой строки — в «не удалось» не считаем и в журнал не пишем.
+                    file_stats["failed"] = 0
                 total_stats["translated"] += file_stats["translated"]
                 total_stats["skipped"] += file_stats["skipped"]
                 total_stats["failed"] += file_stats["failed"]
@@ -2878,7 +3069,10 @@ class App(tk.Tk):
                 self._log(tr("  ОШИБКА при обработке файла {0}: {1}").format(rel, e))
 
             if use_cache:
-                project.save_cache(lang_dir, cache, cache_name)
+                save_caches()
+
+            if aborted and incremental:
+                break
 
             if not incremental:
                 self.log_queue.put(("__PHASE2_PROGRESS__", idx, total_files, rel))
@@ -2886,20 +3080,26 @@ class App(tk.Tk):
                 self._log(tr("  файл {0} из {1} готов").format(idx, total_files))
 
         self._log("")
+        if aborted:
+            self._log(
+                tr("Перевод прерван из-за ошибки соединения с переводчиком (см. сообщение выше). "
+                "Всё уже переведённое сохранено; после устранения проблемы запустите перевод ещё раз.")
+            )
+            return
         if self.stop_requested:
             self._log(tr("Остановлено пользователем."))
         self._log(
             tr("Готово. Всего переведено строк: {0}, пропущено: {1}, "
             "не удалось перевести: {2}, без переводимого текста (только "
             "теги — пропущены): {3}, запросов к переводчику ({4}): {5} "
-            "(из них пакетных: {6}, переведено ими строк: {7}), из кэша: "
-            "{8}, срабатываний ограничения скорости: {9}, ошибок "
+            "(из них пакетных: {6}, переведено ими строк: {7}), взято из кэша прошлых "
+            "запусков: {8}, срабатываний ограничения скорости: {9}, ошибок "
             "перевода: {10}.").format(
                 total_stats["translated"], total_stats["skipped"],
                 total_stats["failed"], total_stats["nothing_to_translate"],
                 engine_titles[engine],
                 translator.stats["requests"], translator.stats["batch_requests"],
-                translator.stats["batched_lines"], translator.stats["cache_hits"],
+                translator.stats["batched_lines"], already_cached,
                 translator.stats["rate_limit_hits"], translator.stats["errors"],
             )
         )
@@ -2955,6 +3155,10 @@ class App(tk.Tk):
     def _worker_gemma_impl(self, lang_dir, files, overwrite, gemma_url, gemma_np, n_predict,
                            context_prompt=None, no_context_prompt=None):
         self._gemma_stop_event = threading.Event()
+        # Ставится при первой же ошибке соединения: все потоки останавливаются,
+        # в журнале остаётся одно сообщение (а не «Не удалось перевести» по каждой строке).
+        fatal_event = threading.Event()
+        speaker_format = self.settings.get("gemma_speaker_format", "label")
 
         # --- Словарь "код персонажа -> настоящее имя" собирается ОДИН
         # раз перед началом перевода — дальше только читается, поэтому
@@ -3017,7 +3221,7 @@ class App(tk.Tk):
 
         def translate_one_file(path):
             rel = os.path.relpath(path, lang_dir)
-            if self._gemma_stop_event.is_set():
+            if self._gemma_stop_event.is_set() or fatal_event.is_set():
                 return
             self._log(tr("Начинаю: {0}").format(rel))
 
@@ -3029,12 +3233,14 @@ class App(tk.Tk):
                 base_url=gemma_url, max_tokens=n_predict, log=self._log,
                 stop_event=self._gemma_stop_event,
                 context_prompt=context_prompt, no_context_prompt=no_context_prompt,
+                fatal_event=fatal_event, speaker_format=speaker_format,
             )
 
-            def translate_and_count(prev_source, prev_translation, protected, rules_name):
+            def translate_and_count(prev_source, prev_translation, protected, rules_name,
+                                    previous_name=None):
                 try:
                     return translator.translate_line(
-                        prev_source, prev_translation, protected, rules_name
+                        prev_source, prev_translation, protected, rules_name, previous_name
                     )
                 finally:
                     # Считаем и неудачные строки — для прогноза важно,
@@ -3051,11 +3257,15 @@ class App(tk.Tk):
             try:
                 new_lines = core.process_lines_contextual(
                     lines, translate_and_count, resolve_speaker,
-                    overwrite=overwrite, stats=file_stats, log=self._log,
+                    overwrite=overwrite, stats=file_stats,
+                    log=(lambda m: None if (self._gemma_stop_event.is_set() or fatal_event.is_set())
+                         else self._log(m)),
                     file_name=rel, protected=protected_for(path),
                 )
                 if file_stats["translated"] > 0:
                     project.write_lines(path, new_lines)
+                if self._gemma_stop_event.is_set() or fatal_event.is_set():
+                    file_stats["failed"] = 0   # остановка или обрыв связи — не сбой перевода
             except Exception as e:
                 self._log(tr("  ОШИБКА при обработке файла {0}: {1}").format(rel, e))
 
@@ -3079,6 +3289,12 @@ class App(tk.Tk):
             list(executor.map(translate_one_file, files))
 
         self._log("")
+        if fatal_event.is_set():
+            self._log(
+                tr("Перевод прерван из-за ошибки соединения с переводчиком (см. сообщение выше). "
+                "Всё уже переведённое сохранено; после устранения проблемы запустите перевод ещё раз.")
+            )
+            return
         if self.stop_requested:
             self._log(tr("Остановлено пользователем."))
         self._log(

@@ -215,8 +215,12 @@ class Gemma4Translator:
                 with self._tok_lock:
                     self.tokens_total += info.get("completion_tokens") or 0
             except Gemma4ConnectionError as e:
-                self._fatal_error = e
-                self.log(str(e))
+                # Сообщение — один раз, даже если сервер недоступен сразу у нескольких потоков.
+                with self._lock:
+                    first = self._fatal_error is None
+                    self._fatal_error = e
+                if first:
+                    self.log(str(e))
                 return None
             except Gemma4Error as e:
                 self.log(tr("Ошибка Gemma 4 (попытка {0}/{1}): {2}.").format(attempt, self.retries, e))

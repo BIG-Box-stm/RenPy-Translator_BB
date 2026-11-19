@@ -26,6 +26,7 @@ from i18n import tr
 import json
 import os
 import re
+import time
 
 import character_names
 import core
@@ -241,6 +242,9 @@ def scan(lang_dir, manual=None, skip=None, dest_code=None):
                 "skip": entry['key'] in file_skip,
                 "suspicious": reasons,
                 "note": "; ".join(reasons),
+                # Нужны импорту (проверка тех же правил, что у «Подозрительных»).
+                "speaker": speaker,
+                "known": known_map.get(speaker.split(" (")[0]) if speaker else None,
             })
     return rows
 
@@ -404,3 +408,185 @@ def unmark_manual(lang_dir, items):
             removed += len(hit)
     _write_raw(lang_dir, manual, skip)
     return removed
+
+
+# ---------------------------------------------------------------------------
+# Экспорт / импорт строк (для перевода нейросетью вне программы)
+# ---------------------------------------------------------------------------
+
+ENTRIES_MARKER = "=== ENTRIES ==="
+_RE_HEAD = re.compile(r'^\[(\d+)\][ \t]*(.*?)\s*$')
+
+_FORMAT_HELP = """=== FILE FORMAT (read carefully) ===
+The text above is the translation prompt: apply its style rules to every entry below.
+Below there are {count} entries. Each entry looks like this:
+
+[0001] Speaker name (may be empty)
+ORIGINAL: text in {src}
+TRANSLATION:
+
+Translate every ORIGINAL into {dest} and write the result right after "TRANSLATION:" on the SAME line.
+Rules:
+- Return the COMPLETE file in exactly the same format: all entries, the same numbers, the same order, no comments and no explanations.
+- One entry = one line of translation (no line breaks inside it).
+- Keep exactly as they are (do not translate, move or delete): tags in curly braces such as {{i}} {{/i}} {{w}} {{p}} {{color=#fff}}, variables in square brackets such as [name] [player_name], percent placeholders such as %s %d %(name)s, and the character sequences \\n and \\".
+- The speaker name is given only so you can choose the correct grammatical gender; never output it.
+"""
+
+
+def export_entries(rows):
+    """[(говорящий, оригинал)] для групп «Не переведённые» и «Подозрительные»
+    (без дублей: одинаковый оригинал одного говорящего берётся один раз)."""
+    seen = set()
+    result = []
+    for r in rows:
+        if r["manual"] or r["skip"]:
+            continue
+        if not (r["untranslated"] or r["suspicious"]):
+            continue
+        key = (r["who"], r["orig"].strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+def build_export_text(entries, prompt_text, src_name, dest_name):
+    """Текст файла для нейросети: промпт, пояснение формата, затем записи."""
+    parts = []
+    if prompt_text:
+        parts.append(prompt_text.strip())
+        parts.append("")
+    parts.append(_FORMAT_HELP.format(count=len(entries), src=src_name or "the source language",
+                                     dest=dest_name or "the target language").rstrip("\n"))
+    parts.append(ENTRIES_MARKER)
+    parts.append("")
+    width = max(4, len(str(len(entries))))
+    for n, (who, orig) in enumerate(entries, start=1):
+        parts.append("[{0}]{1}".format(str(n).zfill(width), (" " + who) if who else ""))
+        parts.append("ORIGINAL: " + orig)
+        parts.append("TRANSLATION:")
+        parts.append("")
+    return "\n".join(parts)
+
+
+def export_file_path(export_dir, lang_dir):
+    """Путь файла экспорта в папке программы; имя начинается с «__», чтобы
+    файл был первым в списке."""
+    game = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(os.path.normpath(lang_dir))))) or "game"
+    lang = os.path.basename(os.path.normpath(lang_dir))
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    safe = re.sub(r'[\\/:*?"<>|]+', "_", "{0}_{1}".format(game, lang))
+    return os.path.join(export_dir, "__strings_{0}_{1}.txt".format(safe, stamp))
+
+
+def parse_import_text(text):
+    """Записи из файла, который вернула нейросеть: [{'id','who','orig','tr'}].
+    Допускает, что нейросеть перенесла длинную строку на следующую строку или
+    обернула ответ в ``` ."""
+    pos = text.find(ENTRIES_MARKER)
+    body = text[pos + len(ENTRIES_MARKER):] if pos >= 0 else text
+    entries = []
+    cur = None
+    mode = None
+    for raw in body.splitlines():
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            continue
+        m = _RE_HEAD.match(line)
+        if m:
+            cur = {"id": m.group(1), "who": m.group(2).strip(), "orig": None, "tr": None}
+            entries.append(cur)
+            mode = None
+            continue
+        if cur is None:
+            continue
+        if line.startswith("ORIGINAL:"):
+            cur["orig"] = line[len("ORIGINAL:"):].strip()
+            mode = "o"
+        elif line.startswith("TRANSLATION:"):
+            cur["tr"] = line[len("TRANSLATION:"):].strip()
+            mode = "t"
+        elif line.strip():
+            if mode == "t":
+                cur["tr"] = ((cur["tr"] or "") + " " + line.strip()).strip()
+            elif mode == "o" and cur["orig"] is not None:
+                cur["orig"] += " " + line.strip()
+    return entries
+
+
+def evaluate_import(rows, entries, dest_code=None):
+    """Сверяет импортированные переводы со строками редактора теми же
+    проверками, что и ручная правка / «Подозрительные».
+    Возвращает dict:
+      edits    — {rel: {key: текст}} — прошли проверки (их можно записывать);
+      kept     — {(rel, key): (текст | None, причина)} — не прошли, остаются в редакторе;
+      not_found, empty — число записей без строки в редакторе / с пустым переводом."""
+    cand = [r for r in rows
+            if (r["untranslated"] or r["suspicious"]) and not r["manual"] and not r["skip"]]
+    by_pair = {}
+    by_orig = {}
+    for r in cand:
+        o = r["orig"].strip()
+        by_pair.setdefault((r["who"], o), []).append(r)
+        by_orig.setdefault(o, []).append(r)
+    result = {"edits": {}, "kept": {}, "not_found": 0, "empty": 0}
+    for e in entries:
+        orig = (e["orig"] or "").strip()
+        translation = (e["tr"] or "").strip()
+        if not translation:
+            result["empty"] += 1
+            continue
+        targets = by_pair.get((e["who"], orig)) or by_orig.get(orig)
+        if not targets:
+            result["not_found"] += 1
+            continue
+        for r in targets:
+            k = (r["rel"], r["key"])
+            inner, error = normalize(translation)
+            if error:
+                result["kept"][k] = (None, error)
+                continue
+            if inner == r["orig"]:
+                result["kept"][k] = (inner, tr("перевод совпадает с оригиналом"))
+                continue
+            reasons = suspicious_reasons(
+                r["orig"], inner, speaker=r.get("speaker"), known=r.get("known"), dest_code=dest_code)
+            if reasons:
+                result["kept"][k] = (inner, "; ".join(reasons))
+            else:
+                result["edits"].setdefault(r["rel"], {})[r["key"]] = inner
+    return result
+
+
+def write_translations(lang_dir, edits, log=None):
+    """Записывает переводы в файлы БЕЗ защиты «переведено вручную» (будто их
+    перевёл сам переводчик): строки просто перестают быть непереведёнными.
+    edits: {rel: {key: текст внутри кавычек}}. Возвращает число строк."""
+    log = log or (lambda msg: None)
+    applied = 0
+    for rel, file_edits in edits.items():
+        path = os.path.join(lang_dir, *rel.split("/"))
+        try:
+            lines = project.read_lines(path)
+        except Exception as e:
+            log(tr("  {0}: ОШИБКА чтения ({1})").format(rel, e))
+            continue
+        out = list(lines)
+        done = set()
+        for entry in core.find_translatable(out):
+            key = entry['key']
+            if key not in file_edits or key in done:
+                continue
+            _set_inner(out, entry, file_edits[key])
+            done.add(key)
+        if not done:
+            continue
+        try:
+            project.write_lines(path, out)
+        except Exception as e:
+            log(tr("  {0}: ОШИБКА записи ({1})").format(rel, e))
+            continue
+        applied += len(done)
+    return applied

@@ -740,15 +740,45 @@ def write_manifest(folder, data):
         json.dump(data, f, ensure_ascii=False, indent=1)
 
 
+def llama_version(folder):
+    """Версия установленной llama.cpp по ответу «llama-server.exe --version»,
+    например «version: 0.6.0-dev (build 11512, commit a11f57ba9)» ->
+    ('b11512', 'a11f57ba9'). Тег сборки на GitHub — «b» + номер build. None —
+    запустить/разобрать не удалось."""
+    exe = os.path.join(folder or "", SERVER_EXE)
+    if not os.path.isfile(exe):
+        return None
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        p = subprocess.run([exe, "--version"], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30, cwd=folder, creationflags=flags)
+        out = (p.stdout or "") + "\n" + (p.stderr or "")
+    except Exception:
+        return None
+    m = re.search(r"build\s+(\d+)", out)
+    if not m:
+        return None
+    c = re.search(r"commit\s+([0-9a-fA-F]+)", out)
+    return "b" + m.group(1), (c.group(1) if c else "")
+
+
 def installed_summary(folder):
-    """Строка вида 'b11721 · cuda-12.4-x64 (CUDA 12.4)' либо None."""
+    """Строка вида 'b11512 (commit a11f57ba9) · cuda-12.4-x64 (CUDA 12.4)'
+    либо None, если llama.cpp в папке нет. Версию сообщает сам llama-server
+    (--version), тип сборки и CUDA берутся из манифеста мастера, если он есть."""
     if not folder or not os.path.isfile(os.path.join(folder, SERVER_EXE)):
         return None
+    ver = llama_version(folder)
     m = read_manifest(folder)
     llama = m.get("llama") or {}
-    if not llama.get("tag"):
-        return tr("версия неизвестна (установлена не мастером)")
-    text = "{0} · {1}".format(llama["tag"], llama.get("variant", "?"))
+    if ver:
+        text = ver[0] + (" (commit {0})".format(ver[1]) if ver[1] else "")
+    elif llama.get("tag"):
+        text = llama["tag"]
+    else:
+        return tr("версию определить не удалось")
+    if llama.get("variant") and (not ver or llama.get("tag") == ver[0]):
+        text += " · " + llama["variant"]
     cuda = m.get("cuda") or {}
     if cuda.get("version"):
         text += " (CUDA {0})".format(cuda["version"])
@@ -960,6 +990,139 @@ def free_space_bytes(path):
         return shutil.disk_usage(p).free
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Ren'Py SDK (renpy.org)
+# ---------------------------------------------------------------------------
+
+RENPY_RELEASE_LIST = "https://www.renpy.org/release_list.html"
+RENPY_SDK_ZIP = "https://www.renpy.org/dl/{v}/renpy-{v}-sdk.zip"
+RENPY_SDK_SFX = "https://www.renpy.org/dl/{v}/renpy-{v}-sdk.7z.exe"
+# Мажорные версии SDK, для которых в мастере есть строка. Версия 9 скрыта,
+# пока на сайте нет ни одного её релиза (см. list_renpy_sdk_versions()).
+SDK_MAJORS = (6, 7, 8, 9)
+# Запасной список на случай, если страницу релизов получить не удалось.
+FALLBACK_SDK = {6: ["6.99.14.3"], 7: ["7.8.7"], 8: ["8.5.3"], 9: []}
+
+
+def _version_tuple(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+def list_renpy_sdk_versions(debug_dir=None):
+    """{мажорная версия: [версии от новых к старым]} по странице
+    https://www.renpy.org/release_list.html (там только финальные релизы).
+    Ссылки на странице бывают и относительными (href="/release/8.5.3"), и
+    полными, поэтому ищем «/release/<версия>» без привязки к домену.
+    Бросает SetupError, если страницу получить или разобрать не удалось; в
+    этом случае (если указан debug_dir) скачанная страница сохраняется в
+    debug_dir\\renpy_release_list_debug.html — для разбора."""
+    try:
+        html = _http_get(RENPY_RELEASE_LIST, timeout=30).decode("utf-8", errors="replace")
+    except Exception as e:
+        raise SetupError(tr("Не удалось получить список версий Ren'Py SDK с renpy.org: {0}").format(e))
+    found = set(re.findall(r"/release/(\d+(?:\.\d+){1,3})[\"']", html))
+    if not found:
+        note = ""
+        if debug_dir:
+            try:
+                os.makedirs(debug_dir, exist_ok=True)
+                path = os.path.join(debug_dir, "renpy_release_list_debug.html")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                note = " " + tr("Страница сохранена в {0} — пришлите её для разбора.").format(path)
+            except Exception:
+                pass
+        raise SetupError(tr("Не удалось получить список версий Ren'Py SDK с renpy.org: {0}")
+                         .format(tr("на странице не найдено ни одной версии") + "." + note))
+    result = {}
+    for v in sorted(found, key=_version_tuple, reverse=True):
+        result.setdefault(int(v.split(".")[0]), []).append(v)
+    return result
+
+
+def installed_sdk_versions(sdk_base):
+    """Множество версий Ren'Py SDK, уже лежащих в папке «RenPy SDK»."""
+    import renpy_sdk
+    return {".".join(str(n) for n in item["version"]) for item in renpy_sdk.list_installed_sdks(sdk_base)}
+
+
+def _extract_sdk_zip(zip_path, sdk_base, version, cancel=None, progress=None):
+    """Распаковывает архив SDK так, чтобы получилась папка
+    <sdk_base>\\renpy-<версия>-sdk (внутри архива она обычно уже есть)."""
+    expected = "renpy-{0}-sdk".format(version)
+    base = os.path.abspath(sdk_base)
+    with zipfile.ZipFile(zip_path) as zf:
+        infos = [i for i in zf.infolist() if not i.filename.endswith("/")]
+        tops = {i.filename.split("/", 1)[0] for i in infos if "/" in i.filename}
+        all_in_dirs = all("/" in i.filename for i in infos)
+        if all_in_dirs and tops == {expected}:
+            dest_root, strip = base, ""
+        elif all_in_dirs and len(tops) == 1:
+            dest_root, strip = os.path.join(base, expected), tops.pop() + "/"
+        else:
+            dest_root, strip = os.path.join(base, expected), ""
+        total = len(infos)
+        for n, info in enumerate(infos, 1):
+            _check_cancel(cancel)
+            rel = info.filename[len(strip):] if strip and info.filename.startswith(strip) else info.filename
+            target = os.path.abspath(os.path.join(dest_root, *rel.split("/")))
+            if not os.path.normcase(target).startswith(os.path.normcase(dest_root) + os.sep):
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zf.open(info) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+            if progress and (n % 50 == 0 or n == total):
+                progress(n, total, "extract")
+    return os.path.join(base, expected)
+
+
+def install_renpy_sdk(version, sdk_base, log=None, progress=None, cancel=None):
+    """Скачивает Ren'Py SDK <версия> с renpy.org и распаковывает в
+    <sdk_base>\\renpy-<версия>-sdk. Основной вариант — .zip; если его нет или он
+    не скачался — запасной: самораспаковывающийся .7z.exe, запускаемый тихо.
+    Возвращает путь к папке SDK."""
+    import renpy_sdk
+    log = log or (lambda m: None)
+    target = os.path.join(sdk_base, "renpy-{0}-sdk".format(version))
+    if os.path.isdir(target) and renpy_sdk._has_launcher(target):
+        log(tr("Ren'Py SDK {0} уже установлен — пропускаю.").format(version))
+        return target
+    os.makedirs(sdk_base, exist_ok=True)
+    dl_dir = os.path.join(sdk_base, DOWNLOADS_DIRNAME)
+    zip_url = RENPY_SDK_ZIP.format(v=version)
+    zip_path = os.path.join(dl_dir, "renpy-{0}-sdk.zip".format(version))
+    done = False
+    size = _content_length(zip_url)
+    if size is not None:
+        log(tr("Скачиваю Ren'Py SDK {0}...").format(version))
+        try:
+            download_file(zip_url, zip_path, size, None, progress, cancel, label="renpy-{0}-sdk.zip".format(version))
+            log(tr("Распаковываю Ren'Py SDK {0}...").format(version))
+            _extract_sdk_zip(zip_path, sdk_base, version, cancel, progress)
+            done = True
+        except SetupError as e:
+            log(tr("Архив .zip не получился ({0}) — пробую запасной вариант (.7z.exe).").format(e))
+    else:
+        log(tr("Архива .zip для этой версии нет — пробую запасной вариант (.7z.exe)."))
+    if not done:
+        sfx_url = RENPY_SDK_SFX.format(v=version)
+        sfx_path = os.path.join(dl_dir, "renpy-{0}-sdk.7z.exe".format(version))
+        download_file(sfx_url, sfx_path, _content_length(sfx_url), None, progress, cancel,
+                      label="renpy-{0}-sdk.7z.exe".format(version))
+        log(tr("Распаковываю Ren'Py SDK {0}...").format(version))
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            subprocess.run([sfx_path, "-o" + os.path.abspath(sdk_base), "-y"], timeout=1200,
+                           creationflags=flags, capture_output=True)
+        except Exception as e:
+            raise SetupError(tr("Не удалось запустить самораспаковывающийся архив: {0}").format(e))
+    if not (os.path.isdir(target) and renpy_sdk._has_launcher(target)):
+        raise SetupError(tr("После распаковки в {0} нет папки SDK {1} — архив оказался неожиданного вида.")
+                         .format(sdk_base, version))
+    shutil.rmtree(dl_dir, ignore_errors=True)
+    return target
 
 
 # ---------------------------------------------------------------------------

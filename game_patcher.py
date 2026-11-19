@@ -382,12 +382,12 @@ def copy_bundle(src_game_dir, dst_game_dir, log=None):
     return count
 
 
-def missing_fonts(game_dir, regular_font, bold_font):
-    """Список шрифтов (из пары regular_font/bold_font), на которые
-    ссылается блок в gui.rpy, но которых нет в папке игры."""
+def missing_fonts(game_dir, *fonts):
+    """Список шрифтов (Regular, Bold и, если он есть в комплекте, Light — пустые
+    значения пропускаются), которых после копирования нет в папке игры."""
     result = []
-    for rel in (regular_font, bold_font):
-        if not os.path.isfile(os.path.join(game_dir, *rel.split("/"))):
+    for rel in fonts:
+        if rel and not os.path.isfile(os.path.join(game_dir, *rel.split("/"))):
             result.append(rel)
     return result
 
@@ -521,6 +521,23 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
         log(str(e))
         return result
     log(tr("Найдена пара шрифтов: {0} / {1}.").format(regular_font, bold_font))
+    # Light — необязательный запасной шрифт для имён персонажей со своим who_font;
+    # проверяется так же, как Regular/Bold (неоднозначность — ошибка, после
+    # копирования файл должен быть в игре), но его отсутствие в комплекте не ошибка.
+    try:
+        light_font = find_light_font(bundle_dir)
+    except FontsNotFoundError as e:
+        log(str(e))
+        return result
+    if light_font:
+        log(tr("Найден запасной шрифт (Light): {0}.").format(light_font))
+    else:
+        log(
+            tr("Запасной шрифт (*-Light.ttf/.otf) в папке {0} не найден — он "
+            "необязателен, но без него шрифты имён персонажей со своим who_font "
+            "не будут заменяться галочкой «Применить локализованные имена».")
+            .format(bundle_dir)
+        )
 
     # --- 0б. резервная копия gui.rpy / screens.rpy (до любых правок) -----
     log(tr("Резервная копия gui.rpy и screens.rpy..."))
@@ -534,7 +551,7 @@ def apply_all(bundle_dir, game_dir, lang, log=None):
         log(tr("  ОШИБКА копирования: {0}").format(e))
         return result
     log(tr("  Скопировано файлов: {0} (в {1}).").format(count, game_dir))
-    missing = missing_fonts(game_dir, regular_font, bold_font)
+    missing = missing_fonts(game_dir, regular_font, bold_font, light_font)
     if missing:
         log(
             tr("  ОШИБКА: после копирования в игре нет шрифтов, на которые "
